@@ -11,12 +11,24 @@ from app.api.v1.auth import router as auth_router
 
 
 from app.db.database import db  # ✅ import the `db` object, not the module
+from fastapi.middleware.cors import CORSMiddleware
 
+
+
+# ✅ Allow all origins, methods, and headers (adjust as needed for production)
 
 
 app = FastAPI(title="Smart Assistant API")
 
 # Route registration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Replace with specific domain(s) in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(routes.router, prefix="/api/v1", tags=["Chatbot"])
 
 
