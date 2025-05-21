@@ -85,3 +85,17 @@ def update_profile(update: UserUpdate, token: str = Depends(oauth2_scheme)):
         raise HTTPException(status_code=400, detail="No fields to update")
     users_collection.update_one({"username": username}, {"$set": update_data})
     return {"message": "Profile updated", "updated_fields": list(update_data.items())}
+
+
+@router.get("/me")
+def get_profile(token: str = Depends(oauth2_scheme)):
+    valid, username = decode_token(token)
+    if not valid:
+        raise HTTPException(status_code=401, detail=username)
+
+    user = users_collection.find_one({"username": username}, {"password": 0})
+
+    if user and "_id" in user:
+        user["_id"] = str(user["_id"])  # convert ObjectId to string
+
+    return user
