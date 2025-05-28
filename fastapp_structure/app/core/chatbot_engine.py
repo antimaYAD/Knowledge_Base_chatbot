@@ -326,13 +326,13 @@ def apply_personality(raw_answer: str, mode: str) -> str:
     mode = mode.lower()
     if mode == "krishna":
         return (
-            "🌸 **Wisdom from the Bhagavad Gita** 🌸\n\n"
+            "🌸 Wisdom from the Bhagavad Gita 🌸\n\n"
             f"🕉️ {raw_answer}\n\n"
             "Let us reflect on this divine insight as Lord Krishna guides us."
         )
     else:
         return (
-            "💡 **Health Insight** 💡\n\n"
+            "💡Health Insight💡\n\n"
             f"{raw_answer}\n\n"
             "Let me know if you have any more health-related questions!"
         )
