@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import Optional, Union, List
 from app.db.journal_model import save_journal_entry
+from app.db.database import users_collection
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
@@ -10,7 +11,7 @@ from datetime import datetime, timedelta
 from fastapi import Query
 from app.db.journal_model import get_journals_by_user_month, get_journals_by_day,patch_journal
 from app.utils.journal_summary_generator import summarize_journals
-
+from datetime import time ,datetime
 
 
 router = APIRouter()
@@ -65,6 +66,26 @@ def save_rich_journal(req: RichJournalEntry, token: str = Depends(oauth2_scheme)
         "body_reaction": req.body_reaction,
         "note": req.note
     }
+
+    today = datetime.utcnow().date()
+    user = users_collection.find_one({"username": username})
+    last_date = user.get("last_journal_date")
+    current_streak = user.get("streak", 0)
+
+    if last_date == today:
+        pass  # Already journaled today
+    elif last_date == today - timedelta(days=1):
+        current_streak += 1
+    else:
+        current_streak = 1  # Reset
+
+    users_collection.update_one(
+        {"username": username},
+        {"$set": {
+            "streak": current_streak,
+            "last_journal_date":  datetime.combine(today, time.min)
+        }}
+    )
 
     save_journal_entry(
         username=username,
