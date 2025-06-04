@@ -4,11 +4,40 @@ from datetime import datetime, timedelta
 from app.api.v1.auth import decode_token
 from app.db.health_data_model import get_health_data_by_range,save_health_data,get_metric_summary, extract_metric_value
 from fastapi.security import OAuth2PasswordBearer
-from typing import Optional, Union, List
+from typing import Optional, Union, List, Dict
 from pydantic import BaseModel
 from bson import ObjectId
-from typing import Dict
+from pytz import UTC
+from enum import Enum
 
+# Configuration settings
+METRIC_SETTINGS = {
+    "steps": {"aggregation": "sum", "decimals": 0},
+    "heartRate": {"aggregation": "avg", "decimals": 0},
+    "spo2": {"aggregation": "avg", "decimals": 1},
+    "sleep": {"aggregation": "sum", "decimals": 0},
+    "calories": {"aggregation": "sum", "decimals": 0}
+}
+
+TIME_RANGES = {
+    "daily": {"days": 1, "format": "%H:%M"},
+    "weekly": {"days": 7, "format": "%Y-%m-%d"},
+    "monthly": {"days": 30, "format": "%Y-%m-%d"},
+    "yearly": {"days": 365, "format": "%Y-%m"}
+}
+
+class MetricType(str, Enum):
+    steps = "steps"
+    heartRate = "heartRate"
+    spo2 = "spo2"
+    sleep = "sleep"
+    calories = "calories"
+
+class TimeRange(str, Enum):
+    daily = "daily"
+    weekly = "weekly"
+    monthly = "monthly"
+    yearly = "yearly"
 
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
@@ -63,45 +92,61 @@ def get_metric_summary_api(
 
 @router.get("/health/graph-data")
 def get_graph_data_api(
-    metric: str = Query(..., enum=["steps", "heartRate", "spo2", "sleep","calories"]),
-    mode: str = Query(..., enum=["daily", "weekly", "monthly", "yearly"]),
+    metric: MetricType,
+    mode: TimeRange,
     token: str = Depends(oauth2_scheme)
 ):
     valid, username = decode_token(token)
     if not valid:
         raise HTTPException(status_code=401, detail=username)
 
-    now = datetime.utcnow()
-
-    if mode == "daily":
+    now = datetime.now(UTC)
+    time_range = TIME_RANGES[mode]
+    
+    if mode == TimeRange.daily:
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        group_by = "%H:%M"
-    elif mode == "weekly":
-        start = now - timedelta(days=7)
-        group_by = "%Y-%m-%d"
-    elif mode == "monthly":
-        start = now - timedelta(days=30)
-        group_by = "%Y-%m-%d"
-    elif mode == "yearly":
-        start = now - timedelta(days=365 * 5)  # up to 5 years history
-        group_by = "%Y"
     else:
-        raise HTTPException(status_code=400, detail="Invalid mode")
+        start = now - timedelta(days=time_range["days"])
 
-    records = get_health_data_by_range(username, start, now)
+    try:
+        records = get_health_data_by_range(username, start, now)
+        if not records:
+            return {"graph": [], "message": "No data found for the specified period"}
 
-    grouped = {}
-    for entry in records:
-        ts = entry["timestamp"].astimezone().strftime(group_by)
-        if ts not in grouped:
-            grouped[ts] = []
-        value = extract_metric_value(entry, metric)
-        if value is not None:
-            grouped[ts].append(value)
+        grouped = {}
+        for entry in records:
+            # Ensure timestamp is in UTC
+            ts = entry["timestamp"].astimezone(UTC).strftime(time_range["format"])
+            if ts not in grouped:
+                grouped[ts] = []
+            
+            value = extract_metric_value(entry, metric)
+            if value is not None:
+                grouped[ts].append(value)
 
-    graph_data = []
-    for label, values in sorted(grouped.items()):
-        y = sum(values) if metric in ["steps", "sleep"] else round(sum(values) / len(values), 2)
-        graph_data.append({"x": label, "y": y})
+        metric_settings = METRIC_SETTINGS[metric]
+        graph_data = []
+        
+        for label, values in sorted(grouped.items()):
+            if not values:
+                continue
+                
+            if metric_settings["aggregation"] == "sum":
+                y = sum(values)
+            else:  # avg
+                y = round(sum(values) / len(values), metric_settings["decimals"])
+                
+            graph_data.append({"x": label, "y": y})
 
-    return {"graph": graph_data}
+        return {
+            "graph": graph_data,
+            "metric": metric,
+            "mode": mode,
+            
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing health data: {str(e)}"
+        )
