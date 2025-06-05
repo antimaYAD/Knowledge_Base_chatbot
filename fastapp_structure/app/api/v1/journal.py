@@ -163,15 +163,17 @@ def journal_conversation(
             }
 
     if step >= 4:
+        # Append Q&A as "Q: ... A: ..." to extra_notes
+        last_question = session.get("last_question", "")
         if user_input and user_input.strip().lower() not in ["no", "nothing", "nope", "i'm good", "na"]:
-            session["extra_notes"].append(user_input)
+            session["extra_notes"].append(f"Q: {last_question}\nA: {user_input.strip()}")
         else:
             entry = {
                 "food_intake": session["answers"][0],
                 "personal": session["answers"][1],
                 "work_or_study": session["answers"][2],
                 "sleep": session["answers"][3],
-                "extra_note": " ".join(session["extra_notes"]),
+                "extra_note": "\n\n".join(session["extra_notes"]),
             }
             save_journal_entry(
                 username=username,
@@ -185,11 +187,15 @@ def journal_conversation(
             user_journal_sessions.pop(username, None)
             return {"message": "✅ Thank you for journaling today! Your notes have been saved."}
 
+        # Generate next follow-up and save for tracking
+        next_question = generate_journal_prompt("extra", username=username, time_of_day=time_of_day)
+        session["last_question"] = next_question
         session["step"] += 1
         return {
-            "question": generate_journal_prompt("extra", username=username, time_of_day=time_of_day),
+            "question": next_question,
             "step": session["step"]
         }
+
 
 # ✅ Patch Journal
 class PatchConversationJournalRequest(BaseModel):

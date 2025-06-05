@@ -19,7 +19,7 @@ def generate_journal_prompt(category: str, context: str = "", username: str = ""
                 "1. Do NOT greet the user in the question (no 'Hello', 'Hi', etc).\n"
                 "2. Ask short, focused journaling questions.\n"
                 "3. Match the tone to time of day (optional).\n"
-                "4. If category is 'sleep', end with a gentle closing prompt.\n"
+                "4. If category is 'sleep', end with a gentle closing prompt such as 'Thank you for journaling would you like to add anything else?.\n"
                 "5. Avoid repeating earlier questions.\n"
                 "6. Keep it conversational but concise (1 sentence)."
             )
