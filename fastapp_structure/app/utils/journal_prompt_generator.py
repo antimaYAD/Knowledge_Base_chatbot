@@ -1,41 +1,51 @@
 from openai import OpenAI
 import os
+from fastapi import HTTPException
+from datetime import datetime
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-def generate_journal_prompt(entry_type: str, health_data: dict = None, mood: str = None) -> str:
-    system_prompt = (
-        "You are a caring assistant. Based on the user's health or emotional state, write a short, reflective journaling question."
-    )
+# 🔥 Add this to track duplicates
+recent_journal_prompts = set()
 
-    user_prompt = f"Generate a journaling question for a {entry_type} entry. "
+def generate_journal_prompt(category: str, context: str = "", username: str = "", time_of_day: str = ""):
+    attempt = 0
+    max_attempts = 3
+    while attempt < max_attempts:
+        try:
+            system_msg = (
+                "You are a journaling assistant.\n"
+                "Follow these rules:\n"
+                "1. Do NOT greet the user in the question (no 'Hello', 'Hi', etc).\n"
+                "2. Ask short, focused journaling questions.\n"
+                "3. Match the tone to time of day (optional).\n"
+                "4. If category is 'sleep', end with a gentle closing prompt.\n"
+                "5. Avoid repeating earlier questions.\n"
+                "6. Keep it conversational but concise (1 sentence)."
+            )
 
-    if health_data:
-        conditions = []
-        if health_data.get("spo2", 100) < 90:
-            conditions.append("low oxygen levels")
-        if health_data.get("heart_rate", 70) > 100 or health_data.get("heart_rate", 70) < 50:
-            conditions.append("abnormal heart rate")
-        if health_data.get("sleep", 7) < 4:
-            conditions.append("insufficient sleep")
-        if conditions:
-            user_prompt += f"The user's health data shows: {', '.join(conditions)}. "
+            user_msg = f"User: {username}\nTime: {time_of_day}\nCategory: {category}\nContext: {context or 'none'}"
 
-    if mood:
-        user_prompt += f"The user is feeling '{mood}'. "
+            response = client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg}
+                ],
+                max_tokens=70,
+                temperature=0.85
+            )
 
-    user_prompt += "Ask a supportive question to help them reflect."
+            prompt = response.choices[0].message.content.strip()  # ✅ Correct usage
+            if prompt not in recent_journal_prompts:
+                recent_journal_prompts.add(prompt)
+                if len(recent_journal_prompts) > 100:
+                    recent_journal_prompts.pop()
+                return prompt
+            else:
+                attempt += 1
+        except Exception as e:
+            print("⚠️ GPT prompt generation error:", e)
+            attempt += 1
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
-        )
-        return response.choices[0].message.content.strip()
-
-    except Exception as e:
-        print("Prompt generation failed:", e)
-        return "How are you feeling today?"
+    raise HTTPException(status_code=500, detail="Failed to generate a unique journaling prompt.")

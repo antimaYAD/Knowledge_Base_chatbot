@@ -89,7 +89,6 @@ def get_metric_summary_api(
 
 
 
-
 @router.get("/health/graph-data")
 def get_graph_data_api(
     metric: MetricType,
