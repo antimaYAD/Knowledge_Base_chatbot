@@ -117,7 +117,7 @@ def generate_journal_prompt(category: str, context: str = "", username: str = ""
             user_msg = f"User: {username}\nTime: {time_of_day or get_time_of_day()}\nCategory: {category}\nContext: {context or 'none'}"
 
             response = client.chat.completions.create(
-                model="gpt-4",
+                model="gpt-3.5-turbo",
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": user_msg}

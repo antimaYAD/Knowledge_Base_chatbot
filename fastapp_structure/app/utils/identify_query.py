@@ -20,7 +20,7 @@ def get_response(query_context: list) -> str:
     }
 
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-3.5-turbo",
         messages=[system_message] + query_context
     )
 
@@ -37,7 +37,7 @@ def get_sql_format_response(query_context: list) -> str:
     }
 
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-3.5-turbo",
         messages=[system_message] + query_context
     )
 
