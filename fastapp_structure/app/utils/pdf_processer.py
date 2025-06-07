@@ -83,7 +83,9 @@ def save_pdf_to_faiss(file_path: str, api_key: str, faiss_folder: str):
 
             # embeddings = OpenAIEmbeddings(openai_api_key=api_key,model = "gpt-3.5turbo")
             # embeddings = OpenAIEmbeddings() 
-            embeddings = OpenAIEmbeddings(openai_api_key=api_key, model="text-embedding-ada-002")
+            embeddings = OpenAIEmbeddings(openai_api_key=api_key, model=os.getenv("OPENAI_API_MODEL")
+
+,base_url=os.getenv("OPENAI_API_BASE_URL"))
             index = FAISS.from_documents(doc_chunks, embeddings)
 
             faiss_path.mkdir(parents=True, exist_ok=True)

@@ -9,13 +9,13 @@ import os
 
 
 def load_faiss_index(path):
-    embeddings = OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY"))
+    embeddings = OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY"),base_url=os.getenv("OPENAI_API_BASE_URL"))
     return FAISS.load_local(path, embeddings, allow_dangerous_deserialization=True)
 
 
 def query_documents(query: str, path: str = None) -> str:
     vector_path = path or "data/faiss_indexes"
-    embeddings = OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY"))
+    embeddings = OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_API_BASE_URL"))
     # vectorstore = FAISS.load_local(vector_path, embeddings)
     vectorstore = FAISS.load_local(vector_path, embeddings, allow_dangerous_deserialization=True)
     retriever = vectorstore.as_retriever(search_kwargs={"k": 1})
@@ -25,7 +25,7 @@ def query_documents(query: str, path: str = None) -> str:
     # retriever = vectorstore.as_retriever()
 
     qa_chain = RetrievalQA.from_chain_type(
-        llm=OpenAI(openai_api_key=os.getenv("OPENAI_API_KEY")),
+        llm=OpenAI(openai_api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_API_BASE_URL")),
         retriever=retriever,
         return_source_documents=False
     )

@@ -1,7 +1,7 @@
 from openai import OpenAI
 import os
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"),base_url=os.getenv("OPENAI_API_BASE_URL"))
 
 def summarize_journals(journal_texts: list[str]) -> str:
     if not journal_texts:
@@ -16,7 +16,9 @@ def summarize_journals(journal_texts: list[str]) -> str:
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=os.getenv("OPENAI_API_MODEL")
+
+,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": combined_text}
@@ -25,3 +27,5 @@ def summarize_journals(journal_texts: list[str]) -> str:
         return response.choices[0].message.content.strip()
     except Exception as e:
         return f"⚠️ Failed to generate summary: {str(e)}"
+
+

@@ -95,7 +95,9 @@ from openai import OpenAI as OpenAIClient
 
 #     try:
 #         response = client.chat.completions.create(
-#             model="gpt-4o-mini",  # or gpt-3.5-turbo or whatever model you're using
+#             model=os.getenv("OPENAI_API_MODEL")
+
+# or gpt-3.5-turbo or whatever model you're using
 #             messages=[
 #                 {"role": "system", "content": system_prompt},
 #                 {"role": "user", "content": user_query}
@@ -266,7 +268,9 @@ from openai import OpenAI as OpenAIClient
 #         # # Ask OpenAI to explain the verse
 #         # openai_client = OpenAIClient(api_key=os.getenv("OPENAI_API_KEY"))
 #         # gpt_response = openai_client.chat.completions.create(
-#         #     model="gpt-4o-mini",
+#         #     model=os.getenv("OPENAI_API_MODEL")
+
+
 #         #     messages=[
 #         #         {
 #         #             "role": "system",
@@ -302,7 +306,7 @@ from app.utils.optimized_code_rag import load_faiss_index
 from app.utils.optimized_code_rag import query_documents
 
 FAISS_FOLDER_PATH = os.path.join("data", "faiss_indexes")
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"),base_url=os.getenv("OPENAI_API_BASE_URL"))
 loaded_indexes = {}
 
 def extract_context(messages):
@@ -348,7 +352,9 @@ def choose_best_answer(user_query: str, candidates: List[str]) -> str:
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=os.getenv("OPENAI_API_MODEL")
+
+,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"User Question: {user_query}\n\n" +

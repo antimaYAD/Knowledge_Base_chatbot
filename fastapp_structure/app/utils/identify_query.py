@@ -8,7 +8,7 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 print(OPENAI_API_KEY)
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY,base_url=os.getenv("OPENAI_API_BASE_URL"))
 
 def get_response(query_context: list) -> str:
     system_message = {
@@ -37,7 +37,7 @@ def get_sql_format_response(query_context: list) -> str:
     }
 
     response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
+        model=os.getenv("OPENAI_API_MODEL"),
         messages=[system_message] + query_context
     )
 

@@ -76,7 +76,7 @@ def journal_conversation(
 
     if step >= 4:
         last_question = session.get("last_question", "")
-        if user_input and user_input.strip().lower() not in ["no", "nothing", "nope", "i'm good", "na"]:
+        if user_input and user_input.strip().lower() not in ["no", "nothing", "nope", "i'm good", "na","noo"]:
             session["extra_notes"].append(f"Q: {last_question}\nA: {user_input.strip()}")
         else:
             entry = {
