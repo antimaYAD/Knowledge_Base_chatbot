@@ -65,6 +65,48 @@ def get_unread_notifications(token: str = Depends(oauth2_scheme)):
         "notifications": unread
     }
 
+@router.get("/alerts/")
+def get_alerts(token: str = Depends(oauth2_scheme)):
+    valid, username = decode_token(token)
+    if not valid:
+        raise HTTPException(status_code=401, detail=username)
+
+    alerts = alert_collection.find({"username": username})
+    alerts_list = list(alerts)
+
+    # Convert ObjectId to str
+    for alert in alerts_list:
+        alert["_id"] = str(alert["_id"])
+
+    return alerts_list
+
+# @router.get("/alerts/{alert_id}")
+# def get_alert_by_id(alert_id: str, token: str = Depends(oauth2_scheme)):
+#     valid, username = decode_token(token)
+#     if not valid:
+#         raise HTTPException(status_code=401, detail=username)
+
+#     alert = alert_collection.find_one({"_id": ObjectId(alert_id), "username": username})
+#     if not alert:
+#         raise HTTPException(status_code=404, detail="Alert not found")
+
+#     return alert
+
+
+
+system_prompt = {
+    "role": "system",
+    "content": (
+        "You are a friendly and supportive health assistant. "
+        "Always respond with one clear, friendly, short question that helps the user reflect on their health. "
+        "Use 'why' or 'what' style questions depending on the metric discussed. "
+        "Keep tone warm, helpful, and non-judgmental. Never give generic advice or long responses. "
+        "Do NOT explain. Just ask a question like:\n"
+        "- Why do you think your oxygen levels dropped recently?\n"
+        "- What affected your activity level today?\n"
+        "- Did anything affect your sleep quality or duration?"
+    )
+}
 
 @router.post("/alerts/{alert_id}/response")
 def save_alert_response(
@@ -80,19 +122,34 @@ def save_alert_response(
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
 
-    # Initialize chat if missing
+    # Determine question based on alert metric
+    metric = alert.get("metric", "general")
+    metric_prompt = {
+        "heartRate": "What might have caused your heart rate to go high?",
+        "spo2": "Why do you think your oxygen levels dropped recently?",
+        "steps": "What affected your activity level today?",
+        "sleep": "Did anything affect your sleep quality or duration?",
+    }.get(metric, "How are you feeling about this recent health update?")
+
     chat = alert.get("chat", [])
     if not chat:
-        chat = [{"role": "assistant", "content": alert.get("message", "Let’s talk about your health alert.")}]
-        alert_collection.update_one({"_id": ObjectId(alert_id)}, {"$set": {"chat": chat}})
+    # First time opening the chat — send metric-based prompt
+        assistant_entry = {"role": "assistant", "content": metric_prompt}
+        chat = [assistant_entry]
 
-    # Limit to 4 user turns (8 messages total including assistant)
+        alert_collection.update_one({"_id": ObjectId(alert_id)}, {"$set": {"chat": chat}})
+        return {
+            "message": "First prompt initiated.",
+            "assistant_reply": metric_prompt
+        }
+
     user_turns = len([m for m in chat if m["role"] == "user"])
     if user_turns >= 4:
-        return {"message": "✅ Conversation ended after 4 rounds.", "assistant_reply": None}
+        return {"message": "✅ Thank you for sharing the reasons , Hope this helps you reflect on your health.", "assistant_reply": None}
 
-    # Add user message
     user_msg = {"role": "user", "content": req.response}
+    print("🔍 User Prompt:", req.response)
+
     alert_collection.update_one(
         {"_id": ObjectId(alert_id)},
         {
@@ -104,21 +161,20 @@ def save_alert_response(
         }
     )
 
-    chat.append(user_msg)  
-
+    chat.append(user_msg)
     try:
         gpt_response = client.chat.completions.create(
-            model=os.getenv("OPENAI_API_MODEL"),
-            messages=chat,
-            max_tokens=100,
-            temperature=0.8
+            model=os.getenv("OPENAI_API_MODEL", "gpt-4"),
+            messages=[system_prompt] + chat,
+            max_tokens=50,
+            temperature=0.4
         )
         assistant_msg = gpt_response.choices[0].message.content.strip()
+        print("🤖 Assistant Reply:", assistant_msg)
     except Exception as e:
         print("⚠️ GPT continuation failed:", e)
         assistant_msg = "Thanks for your response. We'll keep monitoring your health."
 
-    # Save assistant reply
     assistant_entry = {"role": "assistant", "content": assistant_msg}
     alert_collection.update_one(
         {"_id": ObjectId(alert_id)},

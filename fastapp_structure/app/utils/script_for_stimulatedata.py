@@ -5,7 +5,7 @@ import random
 from datetime import datetime ,timedelta
 import time
 
-AUTH_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJBbnRpbWFAMTIzIiwiZXhwIjoxNzQ5Mzc3OTg1fQ.nZFoC_vnfsV5tUOvl438mlvFulEeSl1G1BaP4vsxvo0"
+AUTH_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJBbnRpbWFAMTIzIiwiZXhwIjoxNzQ5NTM5NDgxfQ.f0UnTNhtxZCZhDXUzs5vavRnX2lJ9l8gmAJ51IFEn44"
 
 API_URL = "http://localhost:8000/api/v1/health_data/health/save"
 
