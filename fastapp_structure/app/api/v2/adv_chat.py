@@ -35,7 +35,7 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     reply: str
-
+    history: List[dict]
 
 
 
@@ -906,7 +906,7 @@ def ask_chatbot(req: ChatRequest, token: str = Depends(oauth2_scheme)):
     final_response = apply_personality(response_text, "friendly")
     print(f"✅ Generated {query_type} response with {len(personal_context)} chars personal data and {len(kb_context)} KB sources")
 
-    return {"reply": final_response}
+    return {"reply": final_response, "history": get_recent_history(username)}
 
 
 def save_message(username, role, content):
@@ -921,3 +921,5 @@ def get_recent_history(username, limit=6):
     if doc:
         return doc.get("history", [])[-limit:]
     return []
+
+
