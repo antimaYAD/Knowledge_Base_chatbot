@@ -116,6 +116,13 @@ def save_health_data(username: str, payload: dict):
         metric_data = payload.get(metric, {})
         for ts, val in metric_data.items():
             ts_dt = datetime.fromisoformat(ts)
+
+
+            if health_data_collection.find_one({
+                "username": username,
+                "timestamp": ts_dt
+            }):
+                continue
             doc = {
                 "username": username,
                 "metric": metric,
