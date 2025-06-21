@@ -89,7 +89,6 @@ def get_metric_summary_api(
     return {"metric": metric, "mode": mode, "summary": summary}
 
 
-
 @router.get("/health/graph-data")
 def get_graph_data_api(
     metric: MetricType,
@@ -101,50 +100,69 @@ def get_graph_data_api(
         raise HTTPException(status_code=401, detail=username)
 
     now = datetime.now(UTC)
-    time_range = TIME_RANGES[mode]
-    
+
+    # 1️⃣ Define start date based on mode
     if mode == TimeRange.daily:
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif mode == TimeRange.weekly:
+        start = now - timedelta(days=7)
+    elif mode == TimeRange.monthly:
+        start = now - timedelta(days=30)
+    elif mode == TimeRange.yearly:
+        start = now - timedelta(days=365)
     else:
-        start = now - timedelta(days=time_range["days"])
+        raise HTTPException(status_code=400, detail="Invalid mode")
 
     try:
+        # 2️⃣ Get data from DB
         records = get_health_data_by_range(username, start, now)
         if not records:
             return {"graph": [], "message": "No data found for the specified period"}
 
         grouped = {}
+
         for entry in records:
-            # Ensure timestamp is in UTC
-            ts = entry["timestamp"].astimezone(UTC).strftime(time_range["format"])
-            if ts not in grouped:
-                grouped[ts] = []
-            
+            ts = entry["timestamp"].astimezone(UTC)
+
+            # 3️⃣ Custom time grouping key
+            if mode == TimeRange.daily:
+                key = ts.strftime("%H:%M")  # Hourly
+            elif mode == TimeRange.weekly:
+                key = ts.strftime("%A")  # Weekday name: Sunday, Monday, ...
+            elif mode == TimeRange.monthly:
+                key = ts.strftime("%B")  # Month name: January, February, ...
+            elif mode == TimeRange.yearly:
+                key = ts.strftime("%Y")  # Year: 2024, 2025, ...
+            else:
+                key = ts.strftime("%Y-%m-%d")
+
+            if key not in grouped:
+                grouped[key] = []
+
             value = extract_metric_value(entry, metric)
             if value is not None:
-                grouped[ts].append(value)
+                grouped[key].append(value)
 
         metric_settings = METRIC_SETTINGS[metric]
         graph_data = []
-        
+
         for label, values in sorted(grouped.items()):
             if not values:
                 continue
-                
+
             if metric_settings["aggregation"] == "sum":
                 y = sum(values)
             else:  # avg
                 y = round(sum(values) / len(values), metric_settings["decimals"])
-                
+
             graph_data.append({"x": label, "y": y})
 
         return {
             "graph": graph_data,
             "metric": metric,
             "mode": mode,
-            
         }
-        
+
     except Exception as e:
         raise HTTPException(
             status_code=500,
