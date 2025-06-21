@@ -236,7 +236,7 @@ def extract_metric_value(entry, metric):
         elif metric == "heartRate":
             return entry["value"] if entry["metric"] == "heartRate" else 0
         elif metric == "spo2":
-            return round(entry["value"] * 100, 2) if entry["metric"] == "spo2" else 0
+            return entry["value"]  if entry["metric"] == "spo2" else 0
         elif metric == "sleep":
             return entry["value"] if entry["metric"] == "sleep" else 0
         elif metric == "calories":

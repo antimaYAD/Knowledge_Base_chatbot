@@ -1,543 +1,597 @@
+
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
-from app.api.auth.auth import decode_token
-from app.db.database import users_collection
-from app.db.health_data_model import alert_collection,health_data_collection
 from pydantic import BaseModel
-from typing import List
-from app.db.journal_model import journals_collection
-
-from openai import OpenAI
-# from langchain_community.llms import OpenAI
-# from app.auth import get_current_user
-import dateparser
-from pydantic import BaseModel
-from bson import ObjectId   
-import os
-from app.core.chatbot_engine import client
-from app.core.advance_chatbot import *
-from app.utils.optimized_code_rag import load_faiss_index, query_documents
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings  # ✅ For DeepSeek
-from openai import OpenAI as OpenAIClient
-from datetime import datetime, timedelta
-import re
 from typing import List, Dict, Any, Optional
-from app.db.database import conversations_collection
-import json
+from bson import ObjectId
+from datetime import datetime, timedelta
+import os, json, re
+from openai import OpenAI as OpenAIClient
+
+# Database imports
+from app.db.database import users_collection, conversations_collection
+from app.db.health_data_model import alert_collection, health_data_collection
+from app.db.journal_model import journals_collection
+from app.api.auth.auth import decode_token
+from app.utils.optimized_code_rag import load_faiss_index
+from app.core.chatbot_engine import normalize, apply_personality
 from dotenv import load_dotenv
+
 load_dotenv()
+
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-
-class ChatRequest(BaseModel):
-    question: str
-
-class ChatResponse(BaseModel):
-    reply: str
-    history: List[dict]
-
-
-
-FAISS_FOLDER_PATH = os.path.join("data", "faiss_indexes")
+# Initialize OpenAI client
 client = OpenAIClient(
     api_key=os.getenv("OPENAI_API_KEY"),
     base_url=os.getenv("OPENAI_API_BASE_URL")
 )
-llm = ChatOpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    base_url=os.getenv("OPENAI_API_BASE_URL"),
-    model=os.getenv("OPENAI_API_MODEL")
-)
 
-loaded_indexes= {}
+# FAISS configuration
+FAISS_FOLDER_PATH = os.path.join("data", "faiss_indexes")
+loaded_indexes = {}
 
+# Pydantic models
+class ChatRequest(BaseModel):
+    question: str
+    tags: Optional[List[str]] = None
+    context: Optional[str] = None
+    date: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    conversation_id: Optional[str] = None
 
+class ChatResponse(BaseModel):
+    reply: str
+    history: List[Dict[str, Any]]
+    conversation_id: str
+    query_type: str
+    data_sources: List[str]
 
-@router.get("/metrics/heart_rate/summary")
-def get_heart_rate_summary(token: str = Depends(oauth2_scheme)):
-    valid, username = decode_token(token)
-    if not valid:
-        raise HTTPException(status_code=401, detail="Invalid token")
+# ============================================================================
+# QUERY TYPE DETECTION
+# ============================================================================
 
-    entries = get_heart_rate_data(username)
-    summary = summarize_heart_rate(entries)
-    return {"reply": summary}
-
-
-
-
-
-# Route 3: "-------------------------------------------------------------------------------------"
-
-# ===== INTELLIGENT QUERY ROUTER =====
-
-def detect_query_type_and_context(question: str, username: str):
+def detect_query_type(question: str, username: str) -> tuple[str, List[str]]:
     """
-    Intelligently detect if query needs personal data, general knowledge, or both
-    Returns: query_type, data_sources, context_info
+    Detect if the query requires MongoDB data, knowledge base, or both
+    Returns: (query_type, data_sources)
     """
-    
     question_lower = question.lower()
     
     # Personal data indicators
-    personal_indicators = [
-        'my', 'mine', 'i', 'me', 'today', 'yesterday', 'last week', 'this week',
-        'last month', 'this month', 'my data', 'my records', 'my journal',
-        'my heart rate', 'my steps', 'my sleep', 'my calories','i\'m'
+    personal_keywords = [
+        'my', 'i', 'me', 'mine', "i'm", 'today', 'yesterday', 'last week', 
+        'this week', 'last month', 'this month', 'journal', 'diary', 'note'
     ]
     
-    # Health metrics that could be personal
+    # Health metrics that could be personal or general
     health_metrics = [
-        'heart rate', 'heartrate', 'pulse', 'bpm',
-        'steps', 'walking', 'activity',
-        'spo2', 'oxygen', 'blood oxygen',
-        'sleep', 'sleeping', 'rest',
-        'calories', 'calorie', 'energy',
-        'blood pressure', 'pressure',
-        'weight', 'bmi'
+        'heart rate', 'heartrate', 'pulse', 'bpm', 'steps', 'walking', 'activity',
+        'spo2', 'oxygen', 'blood oxygen', 'sleep', 'calories', 'blood pressure', 
+        'pressure', 'weight', 'bmi'
     ]
     
-    # Context indicators (user wants to reference specific data)
-    context_indicators = [
-        'from', 'on', 'during', 'between', 'since', 'until',
-        'june', 'july', 'monday', 'tuesday', 'yesterday', 'today',
-        'last', 'previous', 'recent', 'latest'
+    # Specific data types
+    personal_data_keywords = [
+        'journal', 'diary', 'entries', 'mood', 'feelings', 'alert', 'warning', 
+        'notification', 'reminder', 'summary'
     ]
     
-    # General health question indicators
-    general_indicators = [
+    # General health information indicators
+    general_keywords = [
         'what is', 'how does', 'why does', 'explain', 'tell me about',
         'definition', 'meaning', 'symptoms', 'causes', 'treatment',
         'normal range', 'healthy', 'should be', 'recommended'
     ]
     
-    # Date extraction patterns
-    date_patterns = [
-        r'\d{1,2}\s+(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{4}',
-        r'\d{1,2}/\d{1,2}/\d{4}',
-        r'\d{4}-\d{1,2}-\d{1,2}',
-        r'today|yesterday|last week|this week'
-    ]
+    # Check for different types of queries
+    has_personal = any(k in question_lower for k in personal_keywords)
+    has_health_metric = any(k in question_lower for k in health_metrics)
+    has_personal_data = any(k in question_lower for k in personal_data_keywords)
+    has_general = any(k in question_lower for k in general_keywords)
     
-    # Analyze the question
-    has_personal = any(indicator in question_lower for indicator in personal_indicators)
-    has_health_metric = any(metric in question_lower for metric in health_metrics)
-    has_context = any(indicator in question_lower for indicator in context_indicators)
-    has_general = any(indicator in question_lower for indicator in general_indicators)
-    has_date = any(re.search(pattern, question_lower) for pattern in date_patterns)
+    # Special handling for step-related queries
+    is_step_query = any(k in question_lower for k in ['steps', 'step', 'walked', 'walking'])
     
-    # Extract specific date if mentioned
-    extracted_date = extract_date_from_question(question) if has_date else None
-    
-    # Extract specific metrics mentioned
-    mentioned_metrics = [metric for metric in health_metrics if metric in question_lower]
+    print(f"🔍 Query Analysis - Personal: {has_personal}, Health Metric: {has_health_metric}, "
+          f"Personal Data: {has_personal_data}, General: {has_general}, Steps: {is_step_query}")
     
     # Determine query type and data sources
-    if has_personal and has_health_metric:
-        if has_general:
-            # Mixed query: "What's normal heart rate and what's my average?"
-            query_type = "hybrid"
-            data_sources = ["mongodb", "knowledge_base"]
-        else:
-            # Pure personal query: "What's my heart rate today?"
-            query_type = "personal"
-            data_sources = ["mongodb"]
-    elif has_general and has_health_metric:
-        if has_personal:
-            # Hybrid: "Is my heart rate normal?" (needs both personal data and general knowledge)
-            query_type = "hybrid"
-            data_sources = ["mongodb", "knowledge_base"]
-        else:
-            # Pure general: "What is normal heart rate?"
-            query_type = "general"
-            data_sources = ["knowledge_base"]
-    elif has_personal:
-        # Personal query without specific health metric: "How am I doing today?"
+    if has_personal_data or (has_personal and has_health_metric) or is_step_query:
         query_type = "personal"
         data_sources = ["mongodb"]
+    elif has_general and not has_personal:
+        query_type = "general"
+        data_sources = ["knowledge_base"]
+    elif has_health_metric and has_general:
+        query_type = "hybrid"
+        data_sources = ["mongodb", "knowledge_base"]
+    elif has_health_metric:
+        query_type = "personal" if has_personal else "general"
+        data_sources = ["mongodb"] if has_personal else ["knowledge_base"]
     else:
-        # Default to general knowledge
         query_type = "general"
         data_sources = ["knowledge_base"]
     
-    context_info = {
-        "date": extracted_date,
-        "metrics": mentioned_metrics,
-        "has_context": has_context,
-        "temporal_reference": has_date
-    }
-    
-    print(f"🧠 Query Analysis: Type={query_type}, Sources={data_sources}, Context={context_info}")
-    
-    return query_type, data_sources, context_info
+    print(f"🎯 Detected - Type: {query_type}, Sources: {data_sources}")
+    return query_type, data_sources
 
-
-# ===== ENHANCED MONGODB QUERY GENERATOR =====
-
-def generate_intelligent_mongo_query(question: str, username: str, context_info: Dict):
-    """
-    Generate MongoDB queries for any personal data request
-    Supports health data, journal entries, alerts, and cross-collection queries
-    """
-    
+def extract_date_context(question: str) -> dict:
+    """Extract date context from natural language"""
     question_lower = question.lower()
+    now = datetime.now()
     
-    # Collection-specific query builders
-    queries = {}
+    if "yesterday" in question_lower:
+        yesterday = now - timedelta(days=1)
+        return {
+            "start_date": yesterday.strftime("%Y-%m-%dT00:00:00.000Z"),
+            "end_date": now.strftime("%Y-%m-%dT00:00:00.000Z"),
+            "date": yesterday.strftime("%Y-%m-%d")
+        }
+    elif "today" in question_lower:
+        return {
+            "start_date": now.strftime("%Y-%m-%dT00:00:00.000Z"),
+            "end_date": (now + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00.000Z"),
+            "date": now.strftime("%Y-%m-%d")
+        }
+    elif "last week" in question_lower:
+        week_start = now - timedelta(days=now.weekday() + 7)
+        week_end = week_start + timedelta(days=7)
+        return {
+            "start_date": week_start.strftime("%Y-%m-%dT00:00:00.000Z"),
+            "end_date": week_end.strftime("%Y-%m-%dT00:00:00.000Z")
+        }
     
-    # Health data queries
-    health_metrics_map = {
-        'heart rate': 'heartRate',
-        'heartrate': 'heartRate',
-        'pulse': 'heartRate',
-        'bpm': 'heartRate',
-        'steps': 'steps',
-        'walking': 'steps',
-        'activity': 'steps',
-        'spo2': 'spo2',
-        'oxygen': 'spo2',
-        'blood oxygen': 'spo2',
-        'sleep': 'sleep',
-        'sleeping': 'sleep',
-        'calories': 'calories',
-        'calorie': 'calories',
-        'blood pressure': 'blood_pressure',
-        'pressure': 'blood_pressure'
-    }
+    return {}
+
+# ============================================================================
+# MONGODB QUERY GENERATION (Fixed Version)
+# ============================================================================
+
+def clean_mongodb_response(generated: str) -> str:
+    """Clean up AI-generated MongoDB query to make it valid JSON"""
     
-    # Build health data query if health metrics mentioned
-    if context_info['metrics']:
-        health_query = {"username": username}
-        
-        # Add specific metrics filter
-        metric_filters = []
-        for mentioned_metric in context_info['metrics']:
-            if mentioned_metric in health_metrics_map:
-                metric_filters.append(health_metrics_map[mentioned_metric])
-        
-        if metric_filters:
-            if len(metric_filters) == 1:
-                health_query["metric"] = metric_filters[0]
-            else:
-                health_query["metric"] = {"$in": metric_filters}
-        
-        # Add date filter if specified
-        if context_info['date']:
-            health_query["$or"] = [
-                {"timestamp": {"$regex": f"^{context_info['date']}"}},
-                {"created_at": {"$regex": f"^{context_info['date']}"}}
-            ]
-        
-        queries["health_data"] = health_query
+    # Remove markdown formatting if present
+    if generated.startswith("```"):
+        generated = generated.strip("`").strip()
+        if generated.lower().startswith("json"):
+            generated = generated[4:].strip()
     
-    # Journal queries (if user asks about feelings, mood, daily activities)
-    journal_keywords = ['journal', 'diary', 'mood', 'feeling', 'day', 'personal', 'food', 'work', 'study']
-    if any(keyword in question_lower for keyword in journal_keywords):
-        journal_query = {"username": username}
-        
-        if context_info['date']:
-            journal_query["timestamp"] = {"$regex": f"^{context_info['date']}"}
-        
-        queries["journal"] = journal_query
+    # Replace single quotes with double quotes
+    generated = generated.replace("'", '"')
     
-    # Alert queries (if user asks about notifications, warnings)
-    alert_keywords = ['alert', 'notification', 'warning', 'reminder']
-    if any(keyword in question_lower for keyword in alert_keywords):
-        alert_query = {"username": username}
-        
-        if context_info['date']:
-            alert_query["$or"] = [
-                {"timestamp": {"$regex": f"^{context_info['date']}"}},
-                {"created_at": {"$regex": f"^{context_info['date']}"}}
-            ]
-        
-        queries["alerts"] = alert_query
+    # Fix ISODate() functions - convert to ISO string format
+    iso_date_pattern = r'ISODate\("([^"]+)"\)'
+    generated = re.sub(iso_date_pattern, r'"\1"', generated)
     
-    # If no specific collection detected but it's a personal query, search all
-    if not queries and any(word in question_lower for word in ['my', 'i', 'me']):
-        base_query = {"username": username}
-        
-        if context_info['date']:
-            date_filter = {"$regex": f"^{context_info['date']}"}
-            queries = {
-                "health_data": {**base_query, "$or": [
-                    {"timestamp": date_filter},
-                    {"created_at": date_filter}
-                ]},
-                "journal": {**base_query, "timestamp": date_filter},
-                "alerts": {**base_query, "$or": [
-                    {"timestamp": date_filter},
-                    {"created_at": date_filter}
-                ]}
-            }
+    # Fix ObjectId() functions if any
+    object_id_pattern = r'ObjectId\("([^"]+)"\)'
+    generated = re.sub(object_id_pattern, r'"\1"', generated)
+    
+    # Remove any trailing commas before closing braces/brackets
+    generated = re.sub(r',(\s*[}\]])', r'\1', generated)
+    
+    return generated
+
+def convert_iso_string_to_datetime(value):
+    """Convert ISO string to datetime object if it's a valid ISO date string"""
+    if isinstance(value, str) and re.match(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z?$', value):
+        try:
+            # Handle both with and without milliseconds
+            if value.endswith('Z'):
+                value = value[:-1] + '+00:00'
+            return datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except ValueError:
+            return value
+    return value
+
+def convert_iso_dates_in_dict(obj: dict) -> dict:
+    """Recursively convert ISO date strings to datetime objects"""
+    if not isinstance(obj, dict):
+        return obj
+    
+    result = {}
+    for key, value in obj.items():
+        if isinstance(value, dict):
+            result[key] = convert_iso_dates_in_dict(value)
+        elif isinstance(value, list):
+            result[key] = [convert_iso_dates_in_dict(item) if isinstance(item, dict) else convert_iso_string_to_datetime(item) for item in value]
         else:
-            queries = {
-                "health_data": base_query,
-                "journal": base_query,
-                "alerts": base_query
-            }
+            result[key] = convert_iso_string_to_datetime(value)
     
-    print(f"🔍 Generated MongoDB queries: {queries}")
-    return queries
+    return result
 
-
-# ===== UNIFIED DATA FETCHER =====
-
-def fetch_personal_data(queries: Dict, username: str) -> Dict[str, List]:
-    """
-    Execute multiple MongoDB queries and return organized results
-    """
+def convert_iso_dates_in_query(query_list: list) -> list:
+    """Convert ISO date strings to datetime objects in MongoDB query"""
+    processed_query = []
     
-    results = {
+    for stage in query_list:
+        processed_stage = convert_iso_dates_in_dict(stage)
+        processed_query.append(processed_stage)
+    
+    return processed_query
+
+def generate_fallback_query(username: str, context: dict) -> Dict[str, Any]:
+    """Generate a simple fallback query when AI generation fails"""
+    
+    fallback_query = {
         "health_data": [],
         "journal": [],
-        "alerts": []
+        "alerts": [],
+        "user_notifications": []
     }
     
-    # Collection mapping
+    # Basic match filter with username
+    base_match = {"username": username}
+    
+    # Add date range if provided
+    if context.get('start_date') and context.get('end_date'):
+        try:
+            start_date = datetime.fromisoformat(context['start_date'].replace('Z', '+00:00'))
+            end_date = datetime.fromisoformat(context['end_date'].replace('Z', '+00:00'))
+            
+            date_filter = {
+                "timestamp": {
+                    "$gte": start_date,
+                    "$lt": end_date
+                }
+            }
+            base_match.update(date_filter)
+        except ValueError:
+            print("⚠️ Invalid date format in context, using basic query")
+    
+    # Generate basic queries for each collection
+    fallback_query["health_data"] = [{"$match": base_match}]
+    fallback_query["journal"] = [{"$match": base_match}]
+    fallback_query["alerts"] = [{"$match": base_match}]
+    
+    return fallback_query
+
+def generate_ai_mongo_query(question: str, username: str, context: dict) -> Dict[str, Any]:
+    """Generate MongoDB queries using AI with improved error handling"""
+    
+    system_prompt = (
+        """You are an assistant that writes MongoDB queries. Return a valid JSON object where keys are 'health_data', 'journal', 'alerts', or 'user_notifications'.
+Each value must be a list (aggregation pipeline). Use [{ "$match": {...} }] format even for simple filters.
+
+IMPORTANT: Use only valid JSON syntax. For dates, use ISO string format like "2025-06-16T00:00:00.000Z" - DO NOT use ISODate() function.
+
+Collections schema:
+- 'health_data': username, metric, value, timestamp, created_at
+- 'alerts': username, metric, value, timestamp, message, responded, created_at  
+- 'journal': username, timestamp, mood, food_intake, sleep, personal, work_or_study, extra_note
+- 'users': has embedded notifications array with fields: type, message, timestamp, read
+
+Always filter by username. Use timestamp with "$gte" and "$lt" for date ranges. For aggregation queries, add "$group" stage.
+
+Health metrics mapping:
+- "steps" → metric: "steps"
+- "heart rate", "heartrate", "pulse", "bpm" → metric: "heartRate" 
+- "spo2", "oxygen" → metric: "spo2"
+- "sleep" → metric: "sleep"
+- "calories" → metric: "calories"
+
+Aggregation types:
+- "total", "sum" → {"$group": {"_id": null, "total_value": {"$sum": "$value"}}}
+- "average", "avg", "mean" → {"$group": {"_id": null, "average_value": {"$avg": "$value"}}}
+- "minimum", "min", "lowest" → {"$group": {"_id": null, "min_value": {"$min": "$value"}}}
+- "maximum", "max", "highest" → {"$group": {"_id": null, "max_value": {"$max": "$value"}}}
+
+Examples:
+
+1. Total steps yesterday:
+{
+  "health_data": [
+    {"$match": {"username": "user123", "metric": "steps", "timestamp": {"$gte": "2025-06-19T00:00:00.000Z", "$lt": "2025-06-20T00:00:00.000Z"}}},
+    {"$group": {"_id": null, "total_steps": {"$sum": "$value"}}}
+  ]
+}
+
+2. Average heart rate:
+{
+  "health_data": [
+    {"$match": {"username": "user123", "metric": "heartRate"}},
+    {"$group": {"_id": null, "average_heartrate": {"$avg": "$value"}}}
+  ]
+}
+
+3. Maximum heart rate today:
+{
+  "health_data": [
+    {"$match": {"username": "user123", "metric": "heartRate", "timestamp": {"$gte": "2025-06-20T00:00:00.000Z", "$lt": "2025-06-21T00:00:00.000Z"}}},
+    {"$group": {"_id": null, "max_heartrate": {"$max": "$value"}}}
+  ]
+}"""
+    )
+
+    user_input = (
+        f"User question: {question}\n"
+        f"Username: {username}\n"
+        f"Date: {context.get('date', '')}\n"
+        f"Start Date: {context.get('start_date', '')}\n"
+        f"End Date: {context.get('end_date', '')}\n\n"
+        f"For questions about 'yesterday', use date range from yesterday 00:00:00 to today 00:00:00.\n"
+        f"Current date context: Today is {datetime.now().strftime('%Y-%m-%d')}, so yesterday was {(datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')}."
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=os.getenv("OPENAI_API_MODEL", "gpt-3.5-turbo"),
+            temperature=0.3,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_input}
+            ]
+        )
+        generated = response.choices[0].message.content.strip()
+
+        if not generated:
+            print("⚠️ Empty response from GPT for query generation.")
+            return {}
+
+        # Clean up the response
+        generated = clean_mongodb_response(generated)
+        
+        print(f"🔍 Generated JSON: {generated}")
+        
+        try:
+            return json.loads(generated)
+        except json.JSONDecodeError as err:
+            print(f"❌ JSON decode failed: {err}")
+            print(f"Raw output: {generated}")
+            return {}
+
+    except Exception as e:
+        print(f"❌ AI Mongo query generation failed: {e}")
+        return {}
+
+def generate_ai_mongo_query_with_fallback(question: str, username: str, context: dict) -> Dict[str, Any]:
+    """Main function with fallback support"""
+    
+    # Try AI generation first
+    result = generate_ai_mongo_query(question, username, context)
+    
+    # If AI generation fails, use fallback
+    if not result:
+        print("🔄 Using fallback query generation")
+        result = generate_fallback_query(username, context)
+    
+    return result
+
+# ============================================================================
+# DATA FETCHING
+# ============================================================================
+
+def fetch_personal_data(queries: Dict, username: str) -> Dict[str, List]:
+    """Enhanced version with better error handling and date conversion"""
+    results = {"health_data": [], "journal": [], "alerts": [], "user_notifications": []}
     collections = {
         "health_data": health_data_collection,
         "journal": journals_collection,
         "alerts": alert_collection
     }
-    
-    # Execute each query
-    for query_type, query in queries.items():
-        if query_type in collections:
-            try:
-                collection = collections[query_type]
-                data = list(collection.find(query))
-                results[query_type] = data
-                print(f"📊 {query_type}: Found {len(data)} records")
-            except Exception as e:
-                print(f"❌ Error querying {query_type}: {e}")
-                results[query_type] = []
+
+    for key, query in queries.items():
+        try:
+            print(f"🔍 Processing {key} query: {query}")
+            
+            if key == "user_notifications":
+                user = users_collection.find_one({"username": username})
+                if user and "notifications" in user:
+                    results[key] = user["notifications"]
+                    print(f"✅ Found {len(results[key])} notifications")
+                else:
+                    print("❌ No notifications found")
+                    
+            elif isinstance(query, list):
+                # Convert ISO date strings to datetime objects in the query
+                processed_query = convert_iso_dates_in_query(query)
+                print(f"🔄 Processed aggregation query: {processed_query}")
+                
+                collection = collections[key]
+                cursor = collection.aggregate(processed_query)
+                results[key] = list(cursor)
+                print(f"✅ Aggregation returned {len(results[key])} results")
+                
+                # Debug: Print first few results
+                if results[key]:
+                    print(f"📋 Sample result: {results[key][0]}")
+                else:
+                    print("⚠️ No results from aggregation - checking if data exists...")
+                    # Test query without aggregation
+                    if processed_query and processed_query[0].get("$match"):
+                        test_query = processed_query[0]["$match"]
+                        test_results = list(collection.find(test_query).limit(5))
+                        print(f"🔍 Test query found {len(test_results)} raw documents")
+                        if test_results:
+                            print(f"📋 Sample raw document: {test_results[0]}")
+                
+            elif isinstance(query, dict):
+                collection = collections[key]
+                if "$match" in query:
+                    # Wrap single $match into aggregation pipeline
+                    processed_query = convert_iso_dates_in_query([query])
+                    results[key] = list(collection.aggregate(processed_query))
+                else:
+                    processed_query = convert_iso_dates_in_dict(query)
+                    results[key] = list(collection.find(processed_query))
+                
+                print(f"✅ Query returned {len(results[key])} results")
+                
+        except Exception as e:
+            print(f"❌ Error in {key}: {e}")
+            import traceback
+            traceback.print_exc()
+            results[key] = []
     
     return results
 
+# ============================================================================
+# CONTEXT BUILDING
+# ============================================================================
 
-# ===== INTELLIGENT CONTEXT BUILDER =====
-
-def build_comprehensive_context(personal_data: Dict[str, List], question: str, username: str) -> str:
-    """
-    Build rich context from all personal data sources
-    """
+def build_comprehensive_context(data: Dict[str, List], username: str) -> str:
+    """Build comprehensive context from fetched data"""
+    context = []
     
-    context_parts = []
-    
-    # Process health data
-    if personal_data["health_data"]:
-        health_summary = process_health_data_for_context(personal_data["health_data"])
-        if health_summary:
-            context_parts.append(f"📊 **Health Data:**\n{health_summary}")
-    
-    # Process journal entries
-    if personal_data["journal"]:
-        journal_summary = process_journal_data_for_context(personal_data["journal"])
-        if journal_summary:
-            context_parts.append(f"📖 **Journal Entries:**\n{journal_summary}")
-    
-    # Process alerts
-    if personal_data["alerts"]:
-        alert_summary = process_alert_data_for_context(personal_data["alerts"])
-        if alert_summary:
-            context_parts.append(f"🚨 **Health Alerts:**\n{alert_summary}")
-    
-    return "\n\n".join(context_parts) if context_parts else ""
-
-
-def process_health_data_for_context(health_data: List[Dict]) -> str:
-    """Process health data into readable context - Fixed version"""
-    
-    if not health_data:
-        return ""
-    
-    # Group by metric
-    metrics = {}
-    for item in health_data:
-        metric = item.get('metric', 'unknown')
-        if metric not in metrics:
-            metrics[metric] = []
+    # Health data analysis
+    if data["health_data"]:
+        # Check if it's aggregation result (like total steps)
+        first_item = data["health_data"][0]
         
-        value = item.get('value')
-        timestamp_raw = item.get('timestamp', item.get('created_at', ''))
-        
-        # Handle timestamp properly
-        if isinstance(timestamp_raw, datetime):
-            timestamp = timestamp_raw.strftime("%Y-%m-%d %H:%M")
-        elif isinstance(timestamp_raw, str):
-            timestamp = timestamp_raw
-        else:
-            timestamp = str(timestamp_raw) if timestamp_raw else 'Unknown time'
-        
-        if value is not None:
-            metrics[metric].append({
-                'value': value,
-                'timestamp': timestamp
-            })
-    
-    # Create summaries for each metric
-    summaries = []
-    for metric, values in metrics.items():
-        if values:
-            # Calculate statistics
-            numeric_values = [v['value'] for v in values if isinstance(v['value'], (int, float))]
-            
-            if numeric_values:
-                avg = sum(numeric_values) / len(numeric_values)
-                min_val = min(numeric_values)
-                max_val = max(numeric_values)
-                latest = values[-1]  # Most recent entry
+        if isinstance(first_item, dict) and any(key in first_item for key in ['total_steps', 'total_value', 'average_value', 'average_heartrate', 'min_value', 'max_value', 'min_heartrate', 'max_heartrate']):
+            # Handle aggregation results
+            if 'total_steps' in first_item:
+                total = first_item['total_steps']
+                context.append(f"📊 **Total Steps**: You walked **{total:,} steps** during the requested period! 🚶‍♀️")
                 
-                # Format metric name
-                metric_display = {
-                    'heartRate': 'Heart Rate (bpm)',
-                    'steps': 'Steps',
-                    'spo2': 'Blood Oxygen (%)',
-                    'sleep': 'Sleep (hours)',
-                    'calories': 'Calories',
-                    'blood_pressure': 'Blood Pressure'
-                }.get(metric, metric)
+            elif 'average_heartrate' in first_item:
+                avg = round(first_item['average_heartrate'], 1)
+                context.append(f"💓 **Average Heart Rate**: Your average heart rate was **{avg} bpm** during the requested period!")
+                if avg < 60:
+                    context.append("📘 This is considered bradycardia (slow heart rate). Consider consulting a healthcare professional if you experience symptoms.")
+                elif avg > 100:
+                    context.append("📘 This is considered tachycardia (fast heart rate). Consider consulting a healthcare professional if you experience symptoms.")
+                else:
+                    context.append("✅ This is within the normal resting heart rate range (60-100 bpm).")
+                    
+            elif 'max_heartrate' in first_item:
+                max_hr = first_item['max_heartrate']
+                context.append(f"📈 **Maximum Heart Rate**: Your peak heart rate was **{max_hr} bpm** during the requested period!")
                 
-                summary = (
-                    f"{metric_display}: Latest={latest['value']}, "
-                    f"Average={avg:.1f}, Range={min_val}-{max_val} "
-                    f"({len(values)} readings)"
-                )
-                summaries.append(summary)
-    
-    return "\n".join(summaries)
-
-def process_journal_data_for_context(journal_data: List[Dict]) -> str:
-    """Process journal data into readable context - Fixed version"""
-    
-    if not journal_data:
-        return ""
-    
-    summaries = []
-    for entry in journal_data:
-        # Handle timestamp properly - it could be datetime object or string
-        timestamp_raw = entry.get('timestamp', 'Unknown time')
-        
-        if isinstance(timestamp_raw, datetime):
-            timestamp = timestamp_raw.strftime("%Y-%m-%d")
-        elif isinstance(timestamp_raw, str):
-            timestamp = timestamp_raw[:10] if len(timestamp_raw) >= 10 else timestamp_raw
+            elif 'min_heartrate' in first_item:
+                min_hr = first_item['min_heartrate']
+                context.append(f"📉 **Minimum Heart Rate**: Your lowest heart rate was **{min_hr} bpm** during the requested period!")
+                
+            elif 'total_value' in first_item:
+                total = first_item['total_value']
+                context.append(f"📊 **Total**: {total:,}")
+                
+            elif 'average_value' in first_item:
+                avg = round(first_item['average_value'], 1)
+                context.append(f"📊 **Average**: {avg}")
+                
+            elif 'min_value' in first_item:
+                min_val = first_item['min_value']
+                context.append(f"📊 **Minimum**: {min_val}")
+                
+            elif 'max_value' in first_item:
+                max_val = first_item['max_value']
+                context.append(f"📊 **Maximum**: {max_val}")
+                
         else:
-            timestamp = str(timestamp_raw)[:10]
-        
-        mood = entry.get('mood', '')
-        
-        # Extract from response field
-        if 'response' in entry:
-            response_raw = entry['response']
+            # Handle individual records
+            values = [d["value"] for d in data["health_data"] if "value" in d and isinstance(d["value"], (int, float))]
+            metric = data["health_data"][0].get("metric", "unknown")
             
-            # Safe parsing using string operations
-            try:
-                if isinstance(response_raw, str):
-                    # Extract values using string parsing
-                    entry_parts = []
-                    
-                    # Extract food_intake
-                    if 'food_intake' in response_raw:
-                        food_match = re.search(r"'food_intake':\s*'([^']*)'", response_raw)
-                        if food_match:
-                            entry_parts.append(f"Food: {food_match.group(1)}")
-                    
-                    # Extract personal
-                    if 'personal' in response_raw:
-                        personal_match = re.search(r"'personal':\s*'([^']*)'", response_raw)
-                        if personal_match:
-                            entry_parts.append(f"Personal: {personal_match.group(1)}")
-                    
-                    # Extract work_or_study
-                    if 'work_or_study' in response_raw:
-                        work_match = re.search(r"'work_or_study':\s*'([^']*)'", response_raw)
-                        if work_match:
-                            entry_parts.append(f"Work: {work_match.group(1)}")
-                    
-                    # Extract sleep
-                    if 'sleep' in response_raw:
-                        sleep_match = re.search(r"'sleep':\s*'([^']*)'", response_raw)
-                        if sleep_match:
-                            entry_parts.append(f"Sleep: {sleep_match.group(1)}")
-                    
-                    # Extract extra_note
-                    if 'extra_note' in response_raw:
-                        note_match = re.search(r"'extra_note':\s*'([^']*)'", response_raw)
-                        if note_match:
-                            entry_parts.append(f"Notes: {note_match.group(1)}")
-                    
-                    if entry_parts:
-                        summary = f"{timestamp} - {'; '.join(entry_parts)}"
-                        if mood:
-                            summary += f" (Mood: {mood})"
-                        summaries.append(summary)
+            if values:
+                total = sum(values)
+                avg = total / len(values)
+                min_val = min(values)
+                max_val = max(values)
+                
+                # Group by date for trend analysis
+                date_groups = {}
+                for d in data["health_data"]:
+                    ts = d.get("timestamp")
+                    if isinstance(ts, datetime):
+                        day = ts.strftime("%Y-%m-%d")
+                        date_groups.setdefault(day, []).append(d["value"])
+                
+                # Trend analysis
+                trend = ""
+                if len(date_groups) >= 3:
+                    sorted_days = sorted(date_groups.items())[-3:]
+                    day_avgs = [sum(vals) / len(vals) for _, vals in sorted_days]
+                    if day_avgs[0] < day_avgs[1] < day_avgs[2]:
+                        trend = "📈 You've shown a 3-day improvement trend!"
+                    elif day_avgs[0] > day_avgs[1] > day_avgs[2]:
+                        trend = "📉 Your recent data suggests a slight decline."
+                
+                # Build summary based on metric type
+                if metric.lower() == "steps":
+                    summary = f"You recorded a total of **{total:,} steps** with {len(values)} readings. Average: {avg:.0f} steps per reading. {trend}"
+                    if total >= 10000:
+                        summary += " 🎉 Excellent! You hit the 10,000+ steps goal!"
+                    elif total >= 7000:
+                        summary += " 👍 Great job staying active!"
                     else:
-                        # If no specific fields found, use the whole response
-                        summary = f"{timestamp} - {response_raw}"
-                        if mood:
-                            summary += f" (Mood: {mood})"
-                        summaries.append(summary)
+                        summary += " 💪 Every step counts - keep it up!"
+                elif metric.lower() in ["heartrate", "heart_rate"]:
+                    summary = f"Heart rate readings: Average {avg:.0f} bpm, Range: {min_val}-{max_val} bpm. {trend}"
+                else:
+                    summary = f"{metric.title()}: Total {total}, Average {avg:.1f}, Range: {min_val}-{max_val}. {trend}"
                 
+                context.append(f"📊 **{metric.title()} Summary**: {summary}")
+    
+    # Alerts analysis
+    if data["alerts"]:
+        alerts = [
+            f"{d.get('timestamp').strftime('%Y-%m-%d') if isinstance(d.get('timestamp'), datetime) else str(d.get('timestamp'))[:10]}: {d.get('message', '')}"
+            for d in data["alerts"]
+        ]
+        context.append("🚨 **Recent Alerts**:\n" + "\n".join(alerts[:5]))
+    
+    # Journal entries analysis
+    if data["journal"]:
+        entries = [
+            f"{d.get('timestamp').strftime('%Y-%m-%d') if isinstance(d.get('timestamp'), datetime) else str(d.get('timestamp'))[:10]} | Sleep: {d.get('sleep', 'N/A')} | Note: {d.get('extra_note', 'N/A')}"
+            for d in data["journal"]
+        ]
+        context.append("📝 **Recent Journal Entries**:\n" + "\n".join(entries[:3]))
+    
+    # Notifications analysis
+    if data.get("user_notifications"):
+        unread = [n for n in data["user_notifications"] if not n.get("read", True)]
+        if unread:
+            summary = [
+                f"{n['timestamp'].strftime('%Y-%m-%d') if isinstance(n['timestamp'], datetime) else str(n['timestamp'])[:10]} - {n['message']}"
+                for n in unread[:5]
+            ]
+            context.append("🔔 **Unread Notifications**:\n" + "\n".join(summary))
+    
+    return "\n\n".join(context) if context else "No recent data available for your query."
+
+# ============================================================================
+# KNOWLEDGE BASE INTEGRATION
+# ============================================================================
+
+def gather_kb_context(query: str) -> List[str]:
+    """Gather context from knowledge base with improved error handling"""
+    context = []
+    
+    if not os.path.exists(FAISS_FOLDER_PATH):
+        print(f"⚠️ FAISS folder not found: {FAISS_FOLDER_PATH}")
+        return context
+    
+    for index_name in os.listdir(FAISS_FOLDER_PATH):
+        path = os.path.join(FAISS_FOLDER_PATH, index_name)
+        if os.path.isdir(path):
+            try:
+                if index_name not in loaded_indexes:
+                    loaded_indexes[index_name] = load_faiss_index(path)
+                
+                if loaded_indexes[index_name]:
+                    retriever = loaded_indexes[index_name]
+                    results = retriever.as_retriever(search_kwargs={"k": 3}).invoke(query)
+                    context += [doc.page_content.strip() for doc in results]
             except Exception as e:
-                print(f"⚠️ Error parsing journal response: {e}")
-                # Ultimate fallback
-                summary = f"{timestamp} - Journal entry available"
-                if mood:
-                    summary += f" (Mood: {mood})"
-                summaries.append(summary)
-        
-        # Fallback to other text fields if response field doesn't exist
-        elif 'text' in entry:
-            summary = f"{timestamp} - {entry['text']}"
-            if mood:
-                summary += f" (Mood: {mood})"
-            summaries.append(summary)
-        else:
-            # If no text content found
-            summary = f"{timestamp} - Journal entry (no text content)"
-            if mood:
-                summary += f" (Mood: {mood})"
-            summaries.append(summary)
+                print(f"⚠️ KB error [{index_name}]: Error code: 404 - {{'error_msg': 'Not Found. Please check the configuration.'}}")
     
-    return "\n".join(summaries)
+    return context
 
-def process_alert_data_for_context(alert_data: List[Dict]) -> str:
-    """Process alert data into readable context - Fixed version"""
-    
-    if not alert_data:
-        return ""
-    
-    summaries = []
-    for alert in alert_data:
-        # Handle timestamp properly - it could be datetime object or string
-        timestamp_raw = alert.get('timestamp', alert.get('created_at', 'Unknown time'))
-        
-        if isinstance(timestamp_raw, datetime):
-            timestamp = timestamp_raw.strftime("%Y-%m-%d")
-        elif isinstance(timestamp_raw, str):
-            timestamp = timestamp_raw[:10] if len(timestamp_raw) >= 10 else timestamp_raw
-        else:
-            timestamp = str(timestamp_raw)[:10] if timestamp_raw else "Unknown time"
-        
-        message = alert.get('message', alert.get('text', 'No message'))
-        priority = alert.get('priority', 'normal')
-        
-        summary = f"{timestamp} - [{priority.upper()}] {message}"
-        summaries.append(summary)
-    
-    return "\n".join(summaries)
-
-
-# ===== HYBRID RESPONSE GENERATOR =====
+# ============================================================================
+# RESPONSE GENERATION
+# ============================================================================
 
 def generate_intelligent_response(question: str, personal_context: str, kb_context: List[str], 
                                 query_type: str, username: str) -> str:
-    """
-    Generate intelligent response combining personal data and knowledge base
-    """
+    """Generate intelligent response using both personal and knowledge base context"""
+    
+    kb_text = "\n".join(kb_context) if kb_context else ""
     
     # Choose system prompt based on query type
     if query_type == "personal":
@@ -545,14 +599,14 @@ def generate_intelligent_response(question: str, personal_context: str, kb_conte
             f"You are a personal health assistant for {username}. Answer their question using their personal health data. "
             f"Be specific, supportive, and provide actionable insights. Reference their actual data points and trends."
         )
-        context_content = f"User's Personal Data:\n{personal_context}" if personal_context else "No personal data found."
+        context_content = f"Personal Data:\n{personal_context}" if personal_context else "No personal data found."
         
     elif query_type == "general":
         system_prompt = (
             "You are a knowledgeable health assistant. Provide accurate, evidence-based health information. "
             "Be informative but remind users to consult healthcare professionals for medical advice."
         )
-        context_content = f"Knowledge Base Information:\n{chr(10).join(kb_context)}" if kb_context else "Limited information available."
+        context_content = f"Knowledge Base Information:\n{kb_text}" if kb_text else "Limited information available."
         
     elif query_type == "hybrid":
         system_prompt = (
@@ -562,132 +616,245 @@ def generate_intelligent_response(question: str, personal_context: str, kb_conte
         
         context_parts = []
         if personal_context:
-            context_parts.append(f"User's Personal Data:\n{personal_context}")
-        if kb_context:
-            context_parts.append(f"General Health Information:\n{chr(10).join(kb_context)}")
+            context_parts.append(f"Personal Data:\n{personal_context}")
+        if kb_text:
+            context_parts.append(f"General Health Information:\n{kb_text}")
         
         context_content = "\n\n".join(context_parts) if context_parts else "Limited data available."
     
     else:
         # Fallback
         system_prompt = "You are a helpful health assistant. Answer the user's question to the best of your ability."
-        context_content = personal_context or (chr(10).join(kb_context) if kb_context else "")
-    
-    # Generate response
+        context_content = personal_context or kb_text
+
     try:
         response = client.chat.completions.create(
-            model=os.getenv("OPENAI_API_MODEL"),
+            model=os.getenv("OPENAI_API_MODEL", "gpt-3.5-turbo"),
+            temperature=0.4,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Question: {question}\n\nContext:\n{context_content}"}
             ]
         )
-        
         return response.choices[0].message.content.strip()
         
     except Exception as e:
-        print(f"❌ Response generation failed: {e}")
-        
-        # Fallback response
-        if personal_context:
-            return f"Based on your personal data: {personal_context[:200]}..."
-        elif kb_context:
-            return f"General information: {kb_context[0][:200]}..."
-        else:
-            return "I couldn't find enough information to answer your question."
+        print(f"❌ Response generation error: {e}")
+        return f"Sorry, I couldn't generate a response at this time. However, based on your question about {question}, I'd recommend consulting with a healthcare professional for personalized advice."
 
+# ============================================================================
+# CONVERSATION MANAGEMENT
+# ============================================================================
 
-# ===== MAIN UNIFIED API =====
+def get_or_create_conversation(convo_id: Optional[str], username: str):
+    """Get existing conversation or create new one"""
+    if convo_id:
+        try:
+            obj_id = ObjectId(convo_id)
+            convo = conversations_collection.find_one({"_id": obj_id, "username": username})
+            if convo:
+                return obj_id
+        except:
+            raise HTTPException(status_code=400, detail="Invalid conversation ID")
+    
+    result = conversations_collection.insert_one({
+        "username": username, 
+        "history": [], 
+        "created_at": datetime.utcnow()
+    })
+    return result.inserted_id
+
+def save_message(convo_id, role: str, content: str):
+    """Save message to conversation history"""
+    conversations_collection.update_one(
+        {"_id": convo_id},
+        {
+            "$push": {
+                "history": {
+                    "role": role, 
+                    "content": content,
+                    "timestamp": datetime.utcnow()
+                }
+            }
+        }
+    )
+
+def get_recent_history(convo_id, limit: int = 6):
+    """Get recent conversation history"""
+    convo = conversations_collection.find_one({"_id": convo_id})
+    return {
+        "_id": str(convo_id), 
+        "history": convo.get("history", [])[-limit:] if convo else []
+    }
+
+# ============================================================================
+# MAIN API ENDPOINT
+# ============================================================================
+
 @router.post("/chat/ask", response_model=ChatResponse)
 def ask_chatbot(req: ChatRequest, token: str = Depends(oauth2_scheme)):
     """
-    Unified intelligent chatbot API that handles:
-    - Personal health data queries (MongoDB)
-    - General health questions (Knowledge Base)
-    - Hybrid queries (Both sources)
-    - Context-aware responses with date/metric filtering
+    Main chatbot endpoint with intelligent query routing
     """
+    # Authenticate user
+    valid, username = decode_token(token)
+    if not valid:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
+    # Normalize and process query
+    query = normalize(req.question)
+    print(f"🤖 Processing query: {query} for user: {username}")
+    
+    # Get or create conversation
+    conversation_id = get_or_create_conversation(req.conversation_id, username)
+    save_message(conversation_id, "user", query)
+
+    # STEP 1: Detect query type and data sources needed
+    query_type, data_sources = detect_query_type(query, username)
+
+    # STEP 2: Prepare context for MongoDB queries (enhanced date detection)
+    context_info = {
+        "date": req.date,
+        "start_date": req.start_date,
+        "end_date": req.end_date,
+        "conversation_id": str(conversation_id)
+    }
+    
+    # Auto-detect date context if not provided
+    if not req.start_date and not req.end_date:
+        auto_date_context = extract_date_context(query)
+        context_info.update(auto_date_context)
+        print(f"📅 Auto-detected date context: {auto_date_context}")
+
+    # STEP 3: Fetch personal data if needed
+    personal_context = ""
+    mongo_queries = {}
+    personal_data = {}
+    
+    if "mongodb" in data_sources:
+        print("📊 Fetching personal data from MongoDB...")
+        mongo_queries = generate_ai_mongo_query_with_fallback(query, username, context_info)
+        print(f"🧠 AI MongoDB Query: {json.dumps(mongo_queries, indent=2)}")
+        
+        personal_data = fetch_personal_data(mongo_queries, username)
+        print(f"📦 MongoDB Query Results: {json.dumps(personal_data, indent=2, default=str)}")
+        
+        # Build context for response generation only
+        personal_context = build_comprehensive_context(personal_data, username)
+
+    # STEP 4: Gather knowledge base context if needed
+    kb_context = []
+    if "knowledge_base" in data_sources:
+        print("📚 Gathering knowledge base context...")
+        kb_context = gather_kb_context(query)
+        print(f"📖 Found {len(kb_context)} KB documents")
+
+    # STEP 5: Generate intelligent response
+    if personal_context or kb_context:
+        response_text = generate_intelligent_response(query, personal_context, kb_context, query_type, username)
+    else:
+        response_text = "I couldn't find relevant information to answer your question. Could you please rephrase or provide more details?"
+
+    # STEP 6: Save assistant response and apply personality
+    save_message(conversation_id, "assistant", response_text)
+    final_response = apply_personality(response_text, "friendly")
+    
+    # STEP 7: Get recent history and return response
+    recent = get_recent_history(conversation_id)
+    
+    print(f"✅ Generated {query_type} response using {data_sources}")
+    
+    return ChatResponse(
+        reply=final_response,
+        history=recent["history"],
+        conversation_id=str(conversation_id),
+        query_type=query_type,
+        data_sources=data_sources
+    )
+
+# ============================================================================
+# ADDITIONAL ENDPOINTS
+# ============================================================================
+
+@router.post("/chat/debug")
+def debug_chat_query(req: ChatRequest, token: str = Depends(oauth2_scheme)):
+    """
+    Debug endpoint that returns raw MongoDB queries and results
+    """
+    valid, username = decode_token(token)
+    if not valid:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    query = normalize(req.question)
+    print(f"🔍 DEBUG: Processing query: {query} for user: {username}")
+    
+    # Detect query type
+    query_type, data_sources = detect_query_type(query, username)
+    
+    # Prepare context
+    context_info = {
+        "date": req.date,
+        "start_date": req.start_date,
+        "end_date": req.end_date
+    }
+    
+    # Auto-detect date context if not provided
+    if not req.start_date and not req.end_date:
+        auto_date_context = extract_date_context(query)
+        context_info.update(auto_date_context)
+    
+    # Generate and execute queries
+    mongo_queries = {}
+    personal_data = {}
+    
+    if "mongodb" in data_sources:
+        mongo_queries = generate_ai_mongo_query_with_fallback(query, username, context_info)
+        personal_data = fetch_personal_data(mongo_queries, username)
+    
+    return {
+        "query": query,
+        "username": username,
+        "query_type": query_type,
+        "data_sources": data_sources,
+        "context_info": context_info,
+        "generated_queries": mongo_queries,
+        "raw_results": personal_data
+    }
+
+@router.get("/chat/history/", response_model=Dict[str, Any])
+def get_previous_conversation(token: str = Depends(oauth2_scheme), limit: int = 6) -> Dict[str, Any]:
+    """Fetch the last 'limit' messages and the conversation ID from the user's history."""
     valid, username = decode_token(token)
     if not valid or not username:
         raise HTTPException(status_code=401, detail="Invalid token or user not found")
 
-    query = normalize(req.question)
-    print(f"🎯 Processing unified query: {query}")
+    conversation = conversations_collection.find_one({"username": username})
+    if conversation and "history" in conversation:
+        return {
+            "_id": str(conversation["_id"]),
+            "history": conversation["history"][-limit:]
+        }
 
-    # Save user message
-    save_message(username, "user", query)
+    return {
+        "_id": None,
+        "history": []
+    }
 
-    # Step 1: Analyze the query to determine type and context
-    query_type, data_sources, context_info = detect_query_type_and_context(query, username)
-
-    # Step 2: Fetch data from appropriate sources
-    personal_context = ""
-    kb_context = []
-
-    # Fetch personal data if needed
-    if "mongodb" in data_sources:
-        print("🔄 Fetching personal data from MongoDB...")
-        mongo_queries = generate_intelligent_mongo_query(query, username, context_info)
-
-        if mongo_queries:
-            personal_data = fetch_personal_data(mongo_queries, username)
-            personal_context = build_comprehensive_context(personal_data, query, username)
-
-    # Fetch knowledge base data if needed
-    print("🔄 Searching knowledge base..plzzzz.")
-    if "knowledge_base" in data_sources:
-        print("🔄 Searching knowledge base...")
-        try:
-            for index_name in os.listdir(FAISS_FOLDER_PATH):
-                index_path = os.path.join(FAISS_FOLDER_PATH, index_name)
-                if os.path.isdir(index_path) and index_name.lower() != "gita":
-                    if index_name not in loaded_indexes:
-                        loaded_indexes[index_name] = load_faiss_index(index_path)
-
-                    index = loaded_indexes[index_name]
-                    if index is not None:
-                        try:
-                            result_docs = index.as_retriever(search_kwargs={"k": 3}).invoke(query)
-                            kb_context.extend([doc.page_content.strip() for doc in result_docs])
-                        except Exception as e:
-                            print(f"❌ Error querying index {index_name}: {e}")
-                            continue
-        except Exception as e:
-            print(f"❌ Knowledge base search failed: {e}")
-
-    # Step 3: Generate intelligent response
-    if personal_context or kb_context:
-        response_text = generate_intelligent_response(
-            query, personal_context, kb_context, query_type, username
-        )
-    else:
-        response_text = "I couldn't find relevant information to answer your question. Try asking about your health data or general health topics."
-
-    # Save assistant message
-    save_message(username, "assistant", response_text)
-
-    # Step 4: Apply personality and return
-    final_response = apply_personality(response_text, "friendly")
-    print(f"✅ Generated {query_type} response with {len(personal_context)} chars personal data and {len(kb_context)} KB sources")
-
-    return {"reply": final_response, "history": get_recent_history(username)}
-
-
-def save_message(username, role, content):
-    conversations_collection.update_one(
+@router.get("/chat/conversations")
+def list_conversations(token: str = Depends(oauth2_scheme)):
+    """List all conversations for the user"""
+    valid, username = decode_token(token)
+    if not valid:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    conversations = list(conversations_collection.find(
         {"username": username},
-        {"$push": {"history": {"role": role, "content": content}}},
-        upsert=True
-    )
-
-def get_recent_history(username, limit=6):
-    doc = conversations_collection.find_one({"username": username})
-    if doc:
-        return doc.get("history", [])[-limit:]
-    return []
-
-
-
-
-#### All the above code is a unified intelligent chatbot API that can handle personal health data queries, general health questions, and hybrid queries by intelligently analyzing the user's question, fetching relevant data from MongoDB and knowledge bases, and generating context-aware responses. It also includes functionality to save conversation history and apply personality to responses.
+        {"_id": 1, "created_at": 1, "history": {"$slice": -1}}
+    ).sort("created_at", -1).limit(10))
+    
+    for conv in conversations:
+        conv["_id"] = str(conv["_id"])
+        conv["last_message"] = conv["history"][0]["content"] if conv["history"] else "No messages"
+        del conv["history"]
+    
+    return {"conversations": conversations}

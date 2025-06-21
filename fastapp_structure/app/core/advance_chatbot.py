@@ -13,10 +13,12 @@ import dateparser
 from bson import ObjectId   
 import os
 from app.core.chatbot_engine import client
+import re
 
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings  # ✅ For DeepSeek
 from openai import OpenAI as OpenAIClient
+from dateutil.parser import parse
 from dotenv import load_dotenv
 load_dotenv()
 router = APIRouter()
@@ -34,15 +36,77 @@ llm = ChatOpenAI(
 )
 
 # Extract natural language date from query
-def extract_date_from_question(text: str):
-    parsed = dateparser.parse(text, settings={
-        "PREFER_DATES_FROM": "past",
-        "RELATIVE_BASE": datetime.utcnow(),
-        "DATE_ORDER": "DMY"
-    })
-    if parsed:
-        return parsed.date().isoformat()
+def extract_date_from_question(question: str):
+    question = question.lower()
+    match = re.search(r'(\d{4}-\d{2}-\d{2})', question)
+    if match:
+        return match.group(1)
+
+    # Try spoken date like "7 june 2025"
+    try:
+        match = re.search(r'\b(\d{1,2}) (jan|feb|mar|apr|may|june|jul|aug|sep|oct|nov|dec)[a-z]* (\d{4})\b', question)
+        if match:
+            date_str = f"{match.group(1)} {match.group(2)} {match.group(3)}"
+            return parse(date_str).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    if "today" in question:
+        return datetime.now().strftime("%Y-%m-%d")
+    if "yesterday" in question:
+        return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    if "last week" in question:
+        end = datetime.now() - timedelta(days=datetime.now().weekday())
+        start = end - timedelta(days=7)
+        return {"start": start, "end": end}
+    if "this week" in question or "weekly" in question:
+        start = datetime.now() - timedelta(days=datetime.now().weekday())
+        end = start + timedelta(days=7)
+        return {"start": start, "end": end}
+    if "this month" in question:
+        start = datetime.now().replace(day=1)
+        end = (start + timedelta(days=32)).replace(day=1)
+        return {"start": start, "end": end}
+    if "last month" in question:
+        start = (datetime.now().replace(day=1) - timedelta(days=1)).replace(day=1)
+        end = datetime.now().replace(day=1)
+        return {"start": start, "end": end}
     return None
+
+
+# def extract_date_from_question(question: str):
+#     question = question.lower()
+
+#     # Try exact YYYY-MM-DD
+#     match = re.search(r'(\d{4}-\d{2}-\d{2})', question)
+    # if match:
+    #     return match.group(1)
+
+    # # Try spoken date like "7 june 2025"
+    # try:
+    #     match = re.search(r'\b(\d{1,2}) (jan|feb|mar|apr|may|june|jul|aug|sep|oct|nov|dec)[a-z]* (\d{4})\b', question)
+    #     if match:
+    #         date_str = f"{match.group(1)} {match.group(2)} {match.group(3)}"
+    #         return parse(date_str).strftime("%Y-%m-%d")
+    # except Exception:
+    #     pass
+
+#     # Handle relative references
+#     if "today" in question:
+#         return datetime.now().strftime("%Y-%m-%d")
+#     if "yesterday" in question:
+#         return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+#     if "last week" in question:
+#         end = datetime.now() - timedelta(days=datetime.now().weekday())
+#         start = end - timedelta(days=7)
+#         return {"start": start, "end": end}
+#     if "this week" in question or "weekly" in question:
+#         start = datetime.now() - timedelta(days=datetime.now().weekday())
+#         end = start + timedelta(days=7)
+#         return {"start": start, "end": end}
+
+#     return None
+
+
 
 # Determine if the query is personal
 def is_personal_query(query: str) -> bool:
