@@ -13,9 +13,10 @@ from openai import OpenAI as OpenAIClient
 from app.db.database import users_collection, conversations_collection
 from app.db.health_data_model import alert_collection, health_data_collection
 from app.db.journal_model import journals_collection
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from app.api.auth.auth import decode_token
-from app.utils.optimized_code_rag import load_faiss_index
-from app.core.chatbot_engine import normalize, apply_personality
+from app.utils.optimized_code_rag import load_faiss_index,query_documents
+from app.core.advance_chatbot import normalize, apply_personality
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -24,13 +25,22 @@ router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 # Initialize OpenAI client
+
+FAISS_FOLDER_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "faiss_indexes")
+)
+
+
 client = OpenAIClient(
     api_key=os.getenv("OPENAI_API_KEY"),
     base_url=os.getenv("OPENAI_API_BASE_URL")
 )
+llm = ChatOpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    base_url=os.getenv("OPENAI_API_BASE_URL"),
+    model=os.getenv("OPENAI_API_MODEL")
+)
 
-# FAISS configuration
-FAISS_FOLDER_PATH = os.path.join("data", "faiss_indexes")
 loaded_indexes = {}
 
 # Pydantic models
@@ -562,25 +572,29 @@ def build_comprehensive_context(data: Dict[str, List], username: str) -> str:
 def gather_kb_context(query: str) -> List[str]:
     """Gather context from knowledge base with improved error handling"""
     context = []
-    
+
     if not os.path.exists(FAISS_FOLDER_PATH):
         print(f"⚠️ FAISS folder not found: {FAISS_FOLDER_PATH}")
         return context
-    
+
     for index_name in os.listdir(FAISS_FOLDER_PATH):
         path = os.path.join(FAISS_FOLDER_PATH, index_name)
         if os.path.isdir(path):
             try:
                 if index_name not in loaded_indexes:
                     loaded_indexes[index_name] = load_faiss_index(path)
-                
-                if loaded_indexes[index_name]:
-                    retriever = loaded_indexes[index_name]
+                    print(f"✅ Successfully loaded FAISS index from {path}")
+
+                retriever = loaded_indexes.get(index_name)
+                if retriever:
                     results = retriever.as_retriever(search_kwargs={"k": 3}).invoke(query)
                     context += [doc.page_content.strip() for doc in results]
+                    print(f"📄 Retrieved {len(results)} documents from: {index_name}")
+                else:
+                    print(f"⚠️ No retriever found for: {index_name}")
             except Exception as e:
-                print(f"⚠️ KB error [{index_name}]: Error code: 404 - {{'error_msg': 'Not Found. Please check the configuration.'}}")
-    
+                print(f"⚠️ KB error loading [{index_name}]: {str(e)}")
+
     return context
 
 # ============================================================================
@@ -744,10 +758,46 @@ def ask_chatbot(req: ChatRequest, token: str = Depends(oauth2_scheme)):
 
     # STEP 4: Gather knowledge base context if needed
     kb_context = []
+    # if "knowledge_base" in data_sources:
+    #     print("📚 Gathering knowledge base context...")
+    #     kb_context = gather_kb_context(query)
+    #     print(f"📖 Found {len(kb_context)} KB documents")
+
     if "knowledge_base" in data_sources:
-        print("📚 Gathering knowledge base context...")
-        kb_context = gather_kb_context(query)
-        print(f"📖 Found {len(kb_context)} KB documents")
+        print("🔄 Searching knowledge base...")
+        try:
+            for index_name in os.listdir(FAISS_FOLDER_PATH):
+                index_name_clean = index_name.strip()
+                index_path = os.path.join(FAISS_FOLDER_PATH, index_name_clean)
+                print(f"🔍 Checking index: {index_path}")
+
+                # Skip if not a directory or missing files
+                if not os.path.isdir(index_path):
+                    continue
+
+                faiss_file = os.path.join(index_path, "index.faiss")
+                pkl_file = os.path.join(index_path, "index.pkl")
+
+                if not (os.path.exists(faiss_file) and os.path.exists(pkl_file)):
+                    print(f"⚠️ Skipping {index_name_clean} — Missing index files.")
+                    continue
+
+                if index_name_clean.lower() == "gita":
+                    continue
+
+                print(f"🔍 Querying FAISS index: {index_name_clean}")  # <-- this line
+
+                # Use helper function to query the index
+                kb_snippets = query_documents(query, index_path)
+                if kb_snippets:
+                    print(f"✅ Retrieved {len(kb_snippets)} snippets from {index_name_clean}")
+                    kb_context.extend(kb_snippets)
+
+            print(f"📚 Total knowledge snippets: {len(kb_context)}")
+
+        except Exception as e:
+            print(f"❌ Knowledge base search failed: {e}")
+
 
     # STEP 5: Generate intelligent response
     if personal_context or kb_context:

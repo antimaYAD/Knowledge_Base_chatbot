@@ -1,10 +1,14 @@
 from langchain.chains import RetrievalQA
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain.chains import RetrievalQA
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
 
 def load_faiss_index(path):
     try:
@@ -23,29 +27,37 @@ def load_faiss_index(path):
         return None
 
 
-# ✅ Query documents using RetrievalQA + DeepSeek (via ChatOpenAI)
-def query_documents(query: str, path: str = None) -> str:
-    vector_path = path or "data/faiss_indexes"
-    embeddings = OpenAIEmbeddings(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        base_url=os.getenv("OPENAI_API_BASE_URL"),
-        model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")  # ✅ FIXED
+
+def query_documents(query: str, path: str) -> str:
+    # print("-------------------FolderPath-------------------", FAISS_FOLDER_PATH)
+    # vector_path = "C:\\Users\\phefa\\OneDrive\\Desktop\\Teach Jewellery\\Knowledge_Base_chatbot\\fastapp_structure\\data\\faiss_indexes\\Parkinson disease"
+    vector_path = path
+    # Use Hugging Face embeddings (free, runs locally)
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={'device': 'cpu'},  # Use 'cuda' if you have GPU
+        encode_kwargs={'normalize_embeddings': True}
     )
+    
     vectorstore = FAISS.load_local(vector_path, embeddings, allow_dangerous_deserialization=True)
     retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
+    # Use DeepSeek for chat/LLM
     qa_chain = RetrievalQA.from_chain_type(
         llm=ChatOpenAI(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            base_url=os.getenv("OPENAI_API_BASE_URL"),
-            model=os.getenv("OPENAI_API_MODEL")
+            api_key=os.getenv("DEEPSEEK_API_KEY"),
+            base_url="https://api.deepseek.com/v1",
+            model="deepseek-chat"
         ),
         retriever=retriever,
         return_source_documents=False
     )
 
-    return qa_chain.run(query)
+    # Use invoke instead of deprecated run method
+    return qa_chain.invoke({"query": query})["result"]
 
-
-
+if __name__ == "__main__":
+    query = "What is Parkinson disease?"
+    result = query_documents(query)
+    print(f"🤖 Answer: {result}")
 

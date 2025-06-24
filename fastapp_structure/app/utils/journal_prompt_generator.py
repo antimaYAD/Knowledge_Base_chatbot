@@ -90,7 +90,7 @@ async def generate_journal_prompt(category: str, context: str = "", username: st
                 "1. Do NOT greet the user.\n"
                 "2. Ask short, thoughtful journaling questions.\n"
                 "3. Tone should match the time of day.\n"
-                "4. If category is 'sleep', end with something gentle like 'Thank you for journaling. Would you like to add anything else?'\n"
+                "4. Ask one clear question only — no polite closings or follow-ups.\n"
                 "5. Avoid repeating questions.\n"
                 "6. One clear sentence only."
             )
