@@ -1,7 +1,11 @@
 from pymongo import MongoClient
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
 # Your MongoDB Atlas URI
-MONGO_URL = "mongodb+srv://sachin:hHJfxxGko6BhI6Xu@cluster0.v1ude2p.mongodb.net/techjewel?retryWrites=true&w=majority&appName=Cluster0"
+MONGO_URL = os.getenv("MONGO_URL")
+
 
 # Connect to the client
 client = MongoClient(MONGO_URL)
