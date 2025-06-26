@@ -565,6 +565,27 @@ def build_comprehensive_context(data: Dict[str, List], username: str) -> str:
     
     return "\n\n".join(context) if context else "No recent data available for your query."
 
+
+
+
+# ============================================================================
+# MONGODB QUERY GENERATION (Fixed Version)
+# ============================================================================
+def is_greeting(text: str) -> bool:
+    greetings = {"hi", "hello", "hey", "good morning", "good night", "good evening", "good afternoon"}
+    return text.strip().lower() in greetings
+
+def get_time_based_greeting() -> str:
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        return "🌞 Good morning! How can I help you today?"
+    elif 12 <= hour < 17:
+        return "🌤️ Good afternoon! How can I assist you?"
+    elif 17 <= hour < 21:
+        return "🌙 Good evening! Need help with any health questions?"
+    else:
+        return "🌜 Good night! If you have any health concerns, feel free to ask!"
+
 # ============================================================================
 # KNOWLEDGE BASE INTEGRATION
 # ============================================================================
@@ -617,6 +638,7 @@ def generate_intelligent_response(question: str, personal_context: str, kb_conte
         
     elif query_type == "general":
         system_prompt = (
+            "answer the hi also based on the time  like hi good morning, good afternoon, good evening, good night "
             "You are a knowledgeable health assistant. Provide accurate, evidence-based health information. "
             "Be informative but remind users to consult healthcare professionals for medical advice."
         )
@@ -718,6 +740,23 @@ def ask_chatbot(req: ChatRequest, token: str = Depends(oauth2_scheme)):
     # Normalize and process query
     query = normalize(req.question)
     print(f"🤖 Processing query: {query} for user: {username}")
+
+
+    if is_greeting(query):
+        conversation_id = get_or_create_conversation(req.conversation_id, username)
+        save_message(conversation_id, "user", query)
+        greeting_response = get_time_based_greeting()
+        save_message(conversation_id, "assistant", greeting_response)
+        final_response = apply_personality(greeting_response, "friendly")
+        recent = get_recent_history(conversation_id)
+        return ChatResponse(
+            reply=final_response,
+            history=recent["history"],
+            conversation_id=str(conversation_id),
+            query_type="general",
+            data_sources=[]
+        )
+
     
     # Get or create conversation
     conversation_id = get_or_create_conversation(req.conversation_id, username)
@@ -782,8 +821,8 @@ def ask_chatbot(req: ChatRequest, token: str = Depends(oauth2_scheme)):
                     print(f"⚠️ Skipping {index_name_clean} — Missing index files.")
                     continue
 
-                if index_name_clean.lower() == "gita":
-                    continue
+                # if index_name_clean.lower() == "gita":
+                #     continue
 
                 print(f"🔍 Querying FAISS index: {index_name_clean}")  # <-- this line
 
