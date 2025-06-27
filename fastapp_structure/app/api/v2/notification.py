@@ -81,19 +81,6 @@ def get_alerts(token: str = Depends(oauth2_scheme)):
 
     return alerts_list
 
-# @router.get("/alerts/{alert_id}")
-# def get_alert_by_id(alert_id: str, token: str = Depends(oauth2_scheme)):
-#     valid, username = decode_token(token)
-#     if not valid:
-#         raise HTTPException(status_code=401, detail=username)
-
-#     alert = alert_collection.find_one({"_id": ObjectId(alert_id), "username": username})
-#     if not alert:
-#         raise HTTPException(status_code=404, detail="Alert not found")
-
-#     return alert
-
-
 
 system_prompt = {
     "role": "system",

@@ -15,6 +15,7 @@ from app.db.health_data_model import alert_collection, health_data_collection
 from app.db.journal_model import journals_collection
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from app.api.auth.auth import decode_token
+import time
 from app.utils.optimized_code_rag import load_faiss_index,query_documents
 from app.core.advance_chatbot import normalize, apply_personality
 from dotenv import load_dotenv
@@ -60,6 +61,41 @@ class ChatResponse(BaseModel):
     query_type: str
     data_sources: List[str]
 
+
+
+
+
+from sentence_transformers import SentenceTransformer, util
+
+topic_model = SentenceTransformer("all-MiniLM-L6-v2")  # local, free, fast
+
+def load_index_descriptions_from_folders(base_path: str) -> dict:
+    """
+    Use FAISS folder names as natural descriptions (underscores replaced with spaces).
+    """
+    descriptions = {}
+    for folder in os.listdir(base_path):
+        folder_path = os.path.join(base_path, folder)
+        if os.path.isdir(folder_path):
+            descriptions[folder] = folder.replace("_", " ").lower()
+    return descriptions
+
+def find_best_matching_index(query: str, index_descriptions: dict) -> str:
+    query_embedding = topic_model.encode(query, convert_to_tensor=True)
+    best_index = None
+    best_score = -1
+
+    for index_name, description in index_descriptions.items():
+        desc_embedding = topic_model.encode(description, convert_to_tensor=True)
+        score = util.pytorch_cos_sim(query_embedding, desc_embedding).item()
+        if score > best_score:
+            best_score = score
+            best_index = index_name
+
+    print(f"🔍 Best match: {best_index} (score: {best_score:.4f})")
+    return best_index
+
+
 # ============================================================================
 # QUERY TYPE DETECTION
 # ============================================================================
@@ -70,6 +106,13 @@ def detect_query_type(question: str, username: str) -> tuple[str, List[str]]:
     Returns: (query_type, data_sources)
     """
     question_lower = question.lower()
+    
+    # General health information indicators
+    general_keywords = [
+        'what is', 'how does', 'why does', 'explain', 'tell me about',
+        'definition', 'meaning', 'symptoms', 'causes', 'treatment',
+        'normal range', 'healthy', 'should be', 'recommended',"why i'm"
+    ]
     
     # Personal data indicators
     personal_keywords = [
@@ -88,13 +131,6 @@ def detect_query_type(question: str, username: str) -> tuple[str, List[str]]:
     personal_data_keywords = [
         'journal', 'diary', 'entries', 'mood', 'feelings', 'alert', 'warning', 
         'notification', 'reminder', 'summary'
-    ]
-    
-    # General health information indicators
-    general_keywords = [
-        'what is', 'how does', 'why does', 'explain', 'tell me about',
-        'definition', 'meaning', 'symptoms', 'causes', 'treatment',
-        'normal range', 'healthy', 'should be', 'recommended'
     ]
     
     # Check for different types of queries
@@ -623,61 +659,62 @@ def gather_kb_context(query: str) -> List[str]:
 # ============================================================================
 
 def generate_intelligent_response(question: str, personal_context: str, kb_context: List[str], 
-                                query_type: str, username: str) -> str:
-    """Generate intelligent response using both personal and knowledge base context"""
+                                  query_type: str, username: str) -> str:
+    """Generate intelligent response using both personal and knowledge base context."""
     
-    kb_text = "\n".join(kb_context) if kb_context else ""
-    
-    # Choose system prompt based on query type
+    kb_text = "\n".join(kb_context[:3]) if kb_context else ""
+
     if query_type == "personal":
         system_prompt = (
-            f"You are a personal health assistant for {username}. Answer their question using their personal health data. "
-            f"Be specific, supportive, and provide actionable insights. Reference their actual data points and trends."
+            f"You are a personal health assistant for {username}. Use their health data to answer. "
+            f"Be supportive and specific. Reference real data points and trends."
         )
         context_content = f"Personal Data:\n{personal_context}" if personal_context else "No personal data found."
-        
+
     elif query_type == "general":
         system_prompt = (
-            "answer the hi also based on the time  like hi good morning, good afternoon, good evening, good night "
-            "You are a knowledgeable health assistant. Provide accurate, evidence-based health information. "
-            "Be informative but remind users to consult healthcare professionals for medical advice."
+            "You are a knowledgeable health assistant. Answer factually based on health knowledge. "
+            "Also, if the user says 'hi', respond with an appropriate greeting based on the time of day."
         )
         context_content = f"Knowledge Base Information:\n{kb_text}" if kb_text else "Limited information available."
-        
+
     elif query_type == "hybrid":
         system_prompt = (
-            f"You are an intelligent health assistant for {username}. Answer their question by combining their personal data "
-            f"with general health knowledge. Compare their data to normal ranges, identify patterns, and provide personalized insights."
+            f"You are a smart health assistant for {username}. Combine their health data with general knowledge. "
+            f"Compare their stats to normal ranges and give helpful insights."
         )
-        
-        context_parts = []
+        parts = []
         if personal_context:
-            context_parts.append(f"Personal Data:\n{personal_context}")
+            parts.append(f"Personal Data:\n{personal_context}")
         if kb_text:
-            context_parts.append(f"General Health Information:\n{kb_text}")
-        
-        context_content = "\n\n".join(context_parts) if context_parts else "Limited data available."
-    
+            parts.append(f"General Health Information:\n{kb_text}")
+        context_content = "\n\n".join(parts) if parts else "Limited data available."
+
     else:
-        # Fallback
-        system_prompt = "You are a helpful health assistant. Answer the user's question to the best of your ability."
-        context_content = personal_context or kb_text
+        system_prompt = "You are a helpful assistant. Answer the user's question to the best of your ability."
+        context_content = personal_context or kb_text or "No data available."
 
     try:
+        start = time.time()
         response = client.chat.completions.create(
-            model=os.getenv("OPENAI_API_MODEL", "gpt-3.5-turbo"),
+            model="deepseek-chat",
             temperature=0.4,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Question: {question}\n\nContext:\n{context_content}"}
             ]
         )
-        return response.choices[0].message.content.strip()
-        
-    except Exception as e:
-        print(f"❌ Response generation error: {e}")
-        return f"Sorry, I couldn't generate a response at this time. However, based on your question about {question}, I'd recommend consulting with a healthcare professional for personalized advice."
+        end = time.time()
+        print(f"⏱️ DeepSeek LLM response time: {end - start:.2f} seconds")
 
+        return response.choices[0].message.content.strip()
+
+    except Exception as e:
+        print(f"❌ LLM generation failed: {e}")
+        return (
+            f"Sorry, I couldn't generate a response at this time. "
+            f"Based on your question about '{question}', I suggest checking with a healthcare provider."
+        )
 # ============================================================================
 # CONVERSATION MANAGEMENT
 # ============================================================================
@@ -802,37 +839,65 @@ def ask_chatbot(req: ChatRequest, token: str = Depends(oauth2_scheme)):
     #     kb_context = gather_kb_context(query)
     #     print(f"📖 Found {len(kb_context)} KB documents")
 
+    # if "knowledge_base" in data_sources:
+    #     print("🔄 Searching knowledge base...")
+    #     try:
+    #         for index_name in os.listdir(FAISS_FOLDER_PATH):
+    #             index_name_clean = index_name.strip()
+    #             index_path = os.path.join(FAISS_FOLDER_PATH, index_name_clean)
+    #             print(f"🔍 Checking index: {index_path}")
+
+    #             # Skip if not a directory or missing files
+    #             if not os.path.isdir(index_path):
+    #                 continue
+
+    #             faiss_file = os.path.join(index_path, "index.faiss")
+    #             pkl_file = os.path.join(index_path, "index.pkl")
+
+    #             if not (os.path.exists(faiss_file) and os.path.exists(pkl_file)):
+    #                 print(f"⚠️ Skipping {index_name_clean} — Missing index files.")
+    #                 continue
+
+    #             # if index_name_clean.lower() == "gita":
+    #             #     continue
+
+    #             print(f"🔍 Querying FAISS index: {index_name_clean}")  # <-- this line
+
+    #             # Use helper function to query the index
+    #             kb_snippets = query_documents(query, index_path)
+    #             if kb_snippets:
+    #                 print(f"✅ Retrieved {len(kb_snippets)} snippets from {index_name_clean}")
+    #                 kb_context.extend(kb_snippets)
+
+    #         print(f"📚 Total knowledge snippets: {len(kb_context)}")
+
+        # except Exception as e:
+        #     print(f"❌ Knowledge base search failed: {e}")
+
+
+
     if "knowledge_base" in data_sources:
         print("🔄 Searching knowledge base...")
         try:
-            for index_name in os.listdir(FAISS_FOLDER_PATH):
-                index_name_clean = index_name.strip()
-                index_path = os.path.join(FAISS_FOLDER_PATH, index_name_clean)
-                print(f"🔍 Checking index: {index_path}")
+            index_descriptions = load_index_descriptions_from_folders(FAISS_FOLDER_PATH)
+            best_index_name = find_best_matching_index(query, index_descriptions)
 
-                # Skip if not a directory or missing files
-                if not os.path.isdir(index_path):
-                    continue
+            if best_index_name:
+                index_path = os.path.join(FAISS_FOLDER_PATH, best_index_name)
 
-                faiss_file = os.path.join(index_path, "index.faiss")
-                pkl_file = os.path.join(index_path, "index.pkl")
-
-                if not (os.path.exists(faiss_file) and os.path.exists(pkl_file)):
-                    print(f"⚠️ Skipping {index_name_clean} — Missing index files.")
-                    continue
-
-                # if index_name_clean.lower() == "gita":
-                #     continue
-
-                print(f"🔍 Querying FAISS index: {index_name_clean}")  # <-- this line
-
-                # Use helper function to query the index
-                kb_snippets = query_documents(query, index_path)
-                if kb_snippets:
-                    print(f"✅ Retrieved {len(kb_snippets)} snippets from {index_name_clean}")
-                    kb_context.extend(kb_snippets)
-
-            print(f"📚 Total knowledge snippets: {len(kb_context)}")
+                if not (
+                    os.path.exists(os.path.join(index_path, "index.faiss")) and
+                    os.path.exists(os.path.join(index_path, "index.pkl"))
+                ):
+                    print(f"⚠️ Index files missing for: {best_index_name}")
+                else:
+                    print(f"🔍 Querying FAISS index: {best_index_name}")
+                    kb_snippets = query_documents(query, index_path)  # uses DeepSeek in chain
+                    if kb_snippets:
+                        kb_context.extend(kb_snippets)
+                        print(f"✅ Retrieved {len(kb_snippets)} snippets from {best_index_name}")
+            else:
+                print("⚠️ No good match found for the query.")
 
         except Exception as e:
             print(f"❌ Knowledge base search failed: {e}")
@@ -840,6 +905,7 @@ def ask_chatbot(req: ChatRequest, token: str = Depends(oauth2_scheme)):
 
     # STEP 5: Generate intelligent response
     if personal_context or kb_context:
+        print("🤖 Generating intelligent response...")
         response_text = generate_intelligent_response(query, personal_context, kb_context, query_type, username)
     else:
         response_text = "I couldn't find relevant information to answer your question. Could you please rephrase or provide more details?"
